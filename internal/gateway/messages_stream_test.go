@@ -2,11 +2,15 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type testSSEEvent struct {
@@ -150,6 +154,72 @@ func TestHandlerStreamsAnthropicErrorWhenUpstreamSSEBecomesInvalid(t *testing.T)
 	errObject := events[1].Data["error"].(map[string]any)
 	if errObject["type"] != "api_error" {
 		t.Fatalf("stream error = %#v", errObject)
+	}
+}
+
+func TestHandlerFlushesAnthropicTextDeltaBeforeUpstreamCompletes(t *testing.T) {
+	t.Parallel()
+
+	continueUpstream := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-progressive\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"first\"},\"finish_reason\":null}]}\n\n")
+		flusher.Flush()
+		select {
+		case <-continueUpstream:
+		case <-r.Context().Done():
+			return
+		}
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-progressive\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" second\"},\"finish_reason\":null}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-progressive\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{UpstreamURL: upstream.URL, UpstreamBearerToken: "server-secret", MaxConcurrent: 1, MaxRequestBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	gateway := httptest.NewServer(handler)
+	defer gateway.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, gateway.URL+"/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("streaming request: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+
+	reader := bufio.NewReader(response.Body)
+	seenFirstDelta := false
+	for !seenFirstDelta {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read first streamed event: %v", err)
+		}
+		if strings.Contains(line, `"type":"text_delta"`) && strings.Contains(line, `"text":"first"`) {
+			seenFirstDelta = true
+		}
+	}
+	close(continueUpstream)
+
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read remaining stream: %v", err)
+	}
+	if !strings.Contains(string(rest), `"text":" second"`) || !strings.Contains(string(rest), `event: message_stop`) {
+		t.Fatalf("remaining stream missing terminal events")
 	}
 }
 
