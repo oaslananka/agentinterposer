@@ -846,6 +846,51 @@ jobs:
                       events.append(value)
           print("claude_code_event_count=" + str(len(events)))
           print("claude_code_event_types=" + ",".join(sorted({str(e.get("type", "unknown")) for e in events})))
+
+          def walk(value):
+              if isinstance(value, dict):
+                  yield value
+                  for child in value.values():
+                      yield from walk(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      yield from walk(child)
+
+          expected = "cat /proc/sys/kernel/random/uuid"
+          bash_commands = []
+          for event in events:
+              for obj in walk(event):
+                  if obj.get("type") != "tool_use" or obj.get("name") != "Bash":
+                      continue
+                  tool_input = obj.get("input")
+                  if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
+                      bash_commands.append(tool_input["command"])
+          print("claude_code_bash_tool_use_count=" + str(len(bash_commands)))
+          if bash_commands:
+              command = bash_commands[0]
+              trimmed = command.strip()
+              print("claude_code_bash_command_length=" + str(len(command)))
+              print("claude_code_bash_command_exact=" + str(command == expected).lower())
+              print("claude_code_bash_command_trimmed_exact=" + str(trimmed == expected).lower())
+              print("claude_code_bash_command_starts_expected=" + str(trimmed.startswith(expected)).lower())
+              print("claude_code_bash_command_contains_uuid_path=" + str("/proc/sys/kernel/random/uuid" in command).lower())
+              print("claude_code_bash_command_has_newline=" + str("\n" in command or "\r" in command).lower())
+              print("claude_code_bash_command_has_pipe=" + str("|" in command).lower())
+              print("claude_code_bash_command_has_redirect=" + str(">" in command or "<" in command).lower())
+              print("claude_code_bash_command_has_single_quote=" + str("'" in command).lower())
+              print("claude_code_bash_command_has_double_quote=" + str('"' in command).lower())
+              first_word = trimmed.split(None, 1)[0] if trimmed else "none"
+              if not re.fullmatch(r"[A-Za-z0-9_./:-]{1,80}", first_word):
+                  first_word = "other"
+              print("claude_code_bash_command_first_word=" + first_word)
+              try:
+                  import shlex
+                  tokens = shlex.split(trimmed)
+              except Exception:
+                  tokens = []
+              print("claude_code_bash_command_token_count=" + str(len(tokens)))
+              print("claude_code_bash_command_semantic_exact=" + str(tokens == ["cat", "/proc/sys/kernel/random/uuid"]).lower())
+
           result = next((e for e in reversed(events) if e.get("type") == "result"), None)
           if result is not None:
               print("claude_code_subtype=" + str(result.get("subtype", "unknown")))
