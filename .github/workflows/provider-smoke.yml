@@ -679,19 +679,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          root='/tmp/agentinterposer-claude-client'
+          root="$RUNNER_TEMP/agentinterposer-claude-client"
           cache="$RUNNER_TEMP/claude-npm-cache"
+          expected_integrity='sha512-zDdtV2tzCfngxKXJLj5/UYHtCVa/yA/L0vF5dBx3w1dx5tcA8+AlyRp3qcsd/gYU7hbI/gS5OoA7C8XqJR9YtA=='
           rm -rf "$root" "$cache"
           mkdir -p "$root" "$cache"
-          NPM_CONFIG_CACHE="$cache" npm install \
-            --prefix "$root" \
-            --no-save \
-            --no-audit \
-            --no-fund \
-            --ignore-scripts \
-            @anthropic-ai/claude-code@2.1.226
-          chmod -R a+rX "$root"
-          claude_bin="$root/node_modules/.bin/claude"
+
+          package="$(cd "$root" && npm --cache "$cache" pack --ignore-scripts --silent @anthropic-ai/claude-code-linux-x64@2.1.226 | tail -1)"
+          package_path="$root/$package"
+          python3 - "$package_path" "$expected_integrity" <<'PY'
+          import base64
+          import hashlib
+          import sys
+
+          path, expected = sys.argv[1:]
+          actual = "sha512-" + base64.b64encode(hashlib.sha512(open(path, "rb").read()).digest()).decode()
+          if actual != expected:
+              raise SystemExit("Claude Code native package integrity mismatch")
+          print("claude_code_package_integrity=ok")
+          PY
+
+          tar -xOf "$package_path" package/claude > "$root/claude"
+          chmod 0755 "$root/claude"
+          rm -f "$package_path"
+          claude_bin="$root/claude"
           version="$($claude_bin --version)"
           if [[ "$version" != 2.1.226* ]]; then
             echo "Unexpected Claude Code version: $version" >&2
