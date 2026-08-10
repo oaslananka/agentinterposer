@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -243,6 +244,10 @@ func (s *messagesStreamState) finish(w http.ResponseWriter, flusher http.Flusher
 	if len(s.tools) == 0 && s.finishReason == "tool_calls" {
 		return errors.New("upstream stream ended with finish_reason=tool_calls but no tool calls")
 	}
+	if len(s.tools) > 0 {
+		return s.finishToolTurn(w, flusher)
+	}
+
 	if s.textOpen {
 		if err := writeAnthropicSSE(w, flusher, "content_block_stop", map[string]any{
 			"type":  "content_block_stop",
@@ -252,53 +257,6 @@ func (s *messagesStreamState) finish(w http.ResponseWriter, flusher http.Flusher
 		}
 		s.textOpen = false
 	}
-
-	indices := make([]int, 0, len(s.tools))
-	for index := range s.tools {
-		indices = append(indices, index)
-	}
-	sort.Ints(indices)
-	for _, toolIndex := range indices {
-		tool := s.tools[toolIndex]
-		if tool.ID == "" || tool.Name == "" {
-			return fmt.Errorf("upstream tool call index %d was incomplete", toolIndex)
-		}
-		arguments, err := compactJSONObject(json.RawMessage(tool.Arguments.String()))
-		if err != nil {
-			return fmt.Errorf("upstream tool call %q contained invalid arguments", tool.ID)
-		}
-		blockIndex := s.nextIndex
-		s.nextIndex++
-		if err := writeAnthropicSSE(w, flusher, "content_block_start", map[string]any{
-			"type":  "content_block_start",
-			"index": blockIndex,
-			"content_block": map[string]any{
-				"type":  "tool_use",
-				"id":    tool.ID,
-				"name":  tool.Name,
-				"input": map[string]any{},
-			},
-		}); err != nil {
-			return err
-		}
-		if err := writeAnthropicSSE(w, flusher, "content_block_delta", map[string]any{
-			"type":  "content_block_delta",
-			"index": blockIndex,
-			"delta": map[string]any{
-				"type":         "input_json_delta",
-				"partial_json": arguments,
-			},
-		}); err != nil {
-			return err
-		}
-		if err := writeAnthropicSSE(w, flusher, "content_block_stop", map[string]any{
-			"type":  "content_block_stop",
-			"index": blockIndex,
-		}); err != nil {
-			return err
-		}
-	}
-
 	stopReason, err := anthropicStopReason(s.finishReason)
 	if err != nil {
 		return err
@@ -317,6 +275,103 @@ func (s *messagesStreamState) finish(w http.ResponseWriter, flusher http.Flusher
 		return err
 	}
 	return writeAnthropicSSE(w, flusher, "message_stop", map[string]any{"type": "message_stop"})
+}
+
+func (s *messagesStreamState) finishToolTurn(w http.ResponseWriter, flusher http.Flusher) error {
+	indices := make([]int, 0, len(s.tools))
+	for index := range s.tools {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+
+	type preparedTool struct {
+		ID        string
+		Name      string
+		Arguments string
+	}
+	prepared := make([]preparedTool, 0, len(indices))
+	for _, toolIndex := range indices {
+		tool := s.tools[toolIndex]
+		if tool.ID == "" || tool.Name == "" {
+			return fmt.Errorf("upstream tool call index %d was incomplete", toolIndex)
+		}
+		arguments, err := compactJSONObject(json.RawMessage(tool.Arguments.String()))
+		if err != nil {
+			return fmt.Errorf("upstream tool call %q contained invalid arguments", tool.ID)
+		}
+		prepared = append(prepared, preparedTool{ID: tool.ID, Name: tool.Name, Arguments: arguments})
+	}
+	stopReason, err := anthropicStopReason(s.finishReason)
+	if err != nil {
+		return err
+	}
+
+	var batch bytes.Buffer
+	if s.textOpen {
+		if err := appendAnthropicSSE(&batch, "content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": s.textIndex,
+		}); err != nil {
+			return err
+		}
+		s.textOpen = false
+	}
+	for _, tool := range prepared {
+		blockIndex := s.nextIndex
+		s.nextIndex++
+		if err := appendAnthropicSSE(&batch, "content_block_start", map[string]any{
+			"type":  "content_block_start",
+			"index": blockIndex,
+			"content_block": map[string]any{
+				"type":  "tool_use",
+				"id":    tool.ID,
+				"name":  tool.Name,
+				"input": map[string]any{},
+			},
+		}); err != nil {
+			return err
+		}
+		if err := appendAnthropicSSE(&batch, "content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": blockIndex,
+			"delta": map[string]any{
+				"type":         "input_json_delta",
+				"partial_json": tool.Arguments,
+			},
+		}); err != nil {
+			return err
+		}
+		if err := appendAnthropicSSE(&batch, "content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": blockIndex,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := appendAnthropicSSE(&batch, "message_delta", map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   stopReason,
+			"stop_sequence": nil,
+		},
+		"usage": map[string]int{
+			"input_tokens":  s.inputTokens,
+			"output_tokens": s.outputTokens,
+		},
+	}); err != nil {
+		return err
+	}
+	if err := appendAnthropicSSE(&batch, "message_stop", map[string]any{"type": "message_stop"}); err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	if _, err := w.Write(batch.Bytes()); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
 }
 
 func (s *messagesStreamState) fail(w http.ResponseWriter, flusher http.Flusher, message string) {
@@ -359,14 +414,19 @@ func readSSEData(reader *bufio.Reader) (string, error) {
 	}
 }
 
-func writeAnthropicSSE(w http.ResponseWriter, flusher http.Flusher, event string, payload any) error {
+func appendAnthropicSSE(w io.Writer, event string, payload any) error {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+	return err
+}
+
+func writeAnthropicSSE(w http.ResponseWriter, flusher http.Flusher, event string, payload any) error {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded); err != nil {
+	if err := appendAnthropicSSE(w, event, payload); err != nil {
 		return err
 	}
 	flusher.Flush()

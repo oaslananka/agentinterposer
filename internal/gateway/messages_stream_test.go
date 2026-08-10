@@ -311,3 +311,75 @@ func TestHandlerStreamsParallelToolCallsInDeterministicOrder(t *testing.T) {
 		t.Fatalf("tool block indices = %#v/%#v", events[1].Data["index"], events[4].Data["index"])
 	}
 }
+
+type recordingSSEWriter struct {
+	header  http.Header
+	writes  [][]byte
+	flushes int
+}
+
+func (w *recordingSSEWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *recordingSSEWriter) WriteHeader(int) {}
+
+func (w *recordingSSEWriter) Write(p []byte) (int, error) {
+	w.writes = append(w.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+func (w *recordingSSEWriter) Flush() {
+	w.flushes++
+}
+
+func TestMessagesStreamBatchesToolTerminalEventsIntoOneFlush(t *testing.T) {
+	t.Parallel()
+
+	var arguments strings.Builder
+	arguments.WriteString(`{"value":1}`)
+	state := messagesStreamState{
+		started:      true,
+		messageID:    "chatcmpl-tool-batch",
+		model:        "nvidia/test",
+		textOpen:     true,
+		textIndex:    0,
+		nextIndex:    1,
+		finishReason: "tool_calls",
+		inputTokens:  7,
+		outputTokens: 3,
+		tools: map[int]*bufferedToolCall{
+			0: {ID: "call_one", Name: "probe", Arguments: arguments},
+		},
+	}
+	writer := &recordingSSEWriter{}
+
+	if err := state.finish(writer, writer); err != nil {
+		t.Fatalf("finish() error = %v", err)
+	}
+	if len(writer.writes) != 1 {
+		t.Fatalf("terminal write count = %d, want 1", len(writer.writes))
+	}
+	if writer.flushes != 1 {
+		t.Fatalf("terminal flush count = %d, want 1", writer.flushes)
+	}
+
+	raw := string(writer.writes[0])
+	for _, event := range []string{
+		"event: content_block_stop",
+		"event: content_block_start",
+		"event: content_block_delta",
+		"event: message_delta",
+		"event: message_stop",
+	} {
+		if !strings.Contains(raw, event) {
+			t.Fatalf("terminal batch missing %q: %s", event, raw)
+		}
+	}
+	if strings.Index(raw, "event: content_block_stop") > strings.Index(raw, "event: content_block_start") {
+		t.Fatalf("text content_block_stop must precede tool content_block_start: %s", raw)
+	}
+}
