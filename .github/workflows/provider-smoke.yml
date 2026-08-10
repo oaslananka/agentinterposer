@@ -16,6 +16,7 @@ on:
         options:
           - baseline
           - full
+          - messages
           - codex
 
 permissions:
@@ -279,6 +280,195 @@ jobs:
               raise SystemExit("AgentInterposer returned an unexpected Responses schema")
           print("agentinterposer_responses_schema=ok")
           PY
+
+      - name: Probe AgentInterposer Messages adapter
+        if: ${{ inputs.scope == 'messages' }}
+        id: messages_gateway
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/agentinterposer-messages"
+          log="$RUNNER_TEMP/agentinterposer-messages.log"
+          text_request="$(mktemp)"
+          text_response="$(mktemp)"
+          tool_request="$(mktemp)"
+          tool_response="$(mktemp)"
+          followup_request="$(mktemp)"
+          followup_response="$(mktemp)"
+          pid=''
+
+          cleanup() {
+            rm -f "$text_request" "$text_response" "$tool_request" "$tool_response" "$followup_request" "$followup_response"
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$log" 2>&1 &
+          pid=$!
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for the Messages probe.' >&2
+            exit 1
+          fi
+
+          python3 - "$MODEL" "$text_request" "$tool_request" <<'PY'
+          import json
+          import sys
+
+          model, text_path, tool_path = sys.argv[1:]
+          with open(text_path, "w", encoding="utf-8") as handle:
+              json.dump({
+                  "model": model,
+                  "max_tokens": 32,
+                  "temperature": 1.0,
+                  "top_p": 0.95,
+                  "messages": [{"role": "user", "content": "Reply briefly with OK."}],
+              }, handle)
+
+          tool = {
+              "name": "get_probe_value",
+              "description": "Return a deterministic probe value supplied by the client.",
+              "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+          }
+          with open(tool_path, "w", encoding="utf-8") as handle:
+              json.dump({
+                  "model": model,
+                  "max_tokens": 128,
+                  "temperature": 1.0,
+                  "top_p": 0.95,
+                  "tools": [tool],
+                  "tool_choice": {"type": "tool", "name": "get_probe_value", "disable_parallel_tool_use": True},
+                  "messages": [{"role": "user", "content": "Call get_probe_value exactly once."}],
+              }, handle)
+          PY
+
+          text_status="$(curl --silent --show-error \
+            --max-time 120 \
+            --output "$text_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/messages' \
+            --header 'Content-Type: application/json' \
+            --header 'anthropic-version: 2023-06-01' \
+            --data-binary "@$text_request")"
+          echo "agentinterposer_messages_text_http=${text_status}"
+          if [[ ! "$text_status" =~ ^2 ]]; then
+            echo 'AgentInterposer Messages text probe failed.' >&2
+            exit 1
+          fi
+          python3 - "$text_response" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          if data.get("type") != "message" or data.get("role") != "assistant":
+              raise SystemExit("Messages text response has an unexpected envelope")
+          content = data.get("content")
+          if not isinstance(content, list) or not any(isinstance(block, dict) and block.get("type") == "text" for block in content):
+              raise SystemExit("Messages text response contains no text block")
+          if data.get("stop_reason") not in {"end_turn", "max_tokens"}:
+              raise SystemExit("Messages text response has an unexpected stop_reason")
+          print("agentinterposer_messages_text_schema=ok")
+          PY
+
+          tool_status="$(curl --silent --show-error \
+            --max-time 120 \
+            --output "$tool_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/messages' \
+            --header 'Content-Type: application/json' \
+            --header 'anthropic-version: 2023-06-01' \
+            --data-binary "@$tool_request")"
+          echo "agentinterposer_messages_tool_http=${tool_status}"
+          if [[ ! "$tool_status" =~ ^2 ]]; then
+            echo 'AgentInterposer Messages tool-use probe failed.' >&2
+            exit 1
+          fi
+
+          python3 - "$MODEL" "$tool_response" "$followup_request" <<'PY'
+          import json
+          import sys
+
+          model, response_path, followup_path = sys.argv[1:]
+          data = json.load(open(response_path, encoding="utf-8"))
+          if data.get("stop_reason") != "tool_use":
+              raise SystemExit("Messages tool response did not stop for tool_use")
+          content = data.get("content")
+          if not isinstance(content, list):
+              raise SystemExit("Messages tool response content is not a list")
+          tool_use = next((block for block in content if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "get_probe_value"), None)
+          if not tool_use or not isinstance(tool_use.get("id"), str) or not tool_use["id"] or not isinstance(tool_use.get("input"), dict):
+              raise SystemExit("Messages tool response has an invalid tool_use block")
+          tool = {
+              "name": "get_probe_value",
+              "description": "Return a deterministic probe value supplied by the client.",
+              "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+          }
+          followup = {
+              "model": model,
+              "max_tokens": 64,
+              "temperature": 1.0,
+              "top_p": 0.95,
+              "tools": [tool],
+              "tool_choice": {"type": "none"},
+              "messages": [
+                  {"role": "user", "content": "Call get_probe_value exactly once."},
+                  {"role": "assistant", "content": content},
+                  {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use["id"], "content": "42"}]},
+              ],
+          }
+          with open(followup_path, "w", encoding="utf-8") as handle:
+              json.dump(followup, handle)
+          print("agentinterposer_messages_tool_use_schema=ok")
+          PY
+
+          followup_status="$(curl --silent --show-error \
+            --max-time 120 \
+            --output "$followup_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/messages' \
+            --header 'Content-Type: application/json' \
+            --header 'anthropic-version: 2023-06-01' \
+            --data-binary "@$followup_request")"
+          echo "agentinterposer_messages_tool_result_http=${followup_status}"
+          if [[ ! "$followup_status" =~ ^2 ]]; then
+            echo 'AgentInterposer Messages tool-result continuation failed.' >&2
+            exit 1
+          fi
+          python3 - "$followup_response" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          if data.get("type") != "message" or data.get("role") != "assistant":
+              raise SystemExit("Messages final response has an unexpected envelope")
+          if data.get("stop_reason") not in {"end_turn", "max_tokens"}:
+              raise SystemExit("Messages final response has an unexpected stop_reason")
+          content = data.get("content")
+          if not isinstance(content, list) or not any(isinstance(block, dict) and block.get("type") == "text" for block in content):
+              raise SystemExit("Messages final response contains no text block")
+          print("agentinterposer_messages_tool_result_round_trip=ok")
+          PY
+          echo 'messages_adapter_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe Codex Responses tool round trip
         if: ${{ inputs.scope == 'codex' }}
@@ -600,6 +790,8 @@ jobs:
           RESPONSES_SUPPORTED: ${{ steps.responses.outputs.responses_supported }}
           MESSAGES_SUPPORTED: ${{ steps.messages.outputs.messages_supported }}
           GATEWAY_OUTCOME: ${{ steps.gateway.outcome }}
+          MESSAGES_GATEWAY_OUTCOME: ${{ steps.messages_gateway.outcome }}
+          MESSAGES_ADAPTER_VERIFIED: ${{ steps.messages_gateway.outputs.messages_adapter_verified }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
         run: |
@@ -613,6 +805,9 @@ jobs:
               echo "- Codex Responses tool round trip: ${CODEX_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
+            elif [ "$SCOPE" = 'messages' ]; then
+              echo "- AgentInterposer Messages adapter step: ${MESSAGES_GATEWAY_OUTCOME:-not-run}"
+              echo "- Messages text + tool round trip: ${MESSAGES_ADAPTER_VERIFIED:-not-verified}"
             else
               echo "- Chat Completions step: ${CHAT_OUTCOME:-not-run}"
               echo "- Responses API: ${RESPONSES_SUPPORTED:-unknown}"
