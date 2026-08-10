@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -32,6 +34,14 @@ type handler struct {
 }
 
 func NewHandler(cfg Config) (http.Handler, error) {
+	upstreamURL := strings.TrimRight(cfg.UpstreamURL, "/")
+	if upstreamURL != "" {
+		parsed, err := url.Parse(upstreamURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return nil, fmt.Errorf("invalid upstream URL %q", cfg.UpstreamURL)
+		}
+	}
+
 	maxConcurrent := cfg.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = 3
@@ -46,7 +56,7 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	}
 
 	h := &handler{
-		upstreamURL:         strings.TrimRight(cfg.UpstreamURL, "/"),
+		upstreamURL:         upstreamURL,
 		upstreamBearerToken: cfg.UpstreamBearerToken,
 		maxRequestBytes:     maxRequestBytes,
 		semaphore:           make(chan struct{}, maxConcurrent),
@@ -102,12 +112,42 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	copyHeader(w.Header(), upstreamResponse.Header, "Cache-Control")
 	copyHeader(w.Header(), upstreamResponse.Header, "Retry-After")
 	w.WriteHeader(upstreamResponse.StatusCode)
-	_, _ = io.Copy(w, upstreamResponse.Body)
+	_ = copyResponseBody(w, upstreamResponse.Body, upstreamResponse.Header.Get("Content-Type"))
+}
+
+func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string) error {
+	if !strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
+		_, err := io.Copy(w, body)
+		return err
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		_, err := io.Copy(w, body)
+		return err
+	}
+
+	buffer := make([]byte, 32*1024)
+	for {
+		n, readErr := body.Read(buffer)
+		if n > 0 {
+			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+				return writeErr
+			}
+			flusher.Flush()
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			return readErr
+		}
+	}
 }
 
 func (h *handler) doUpstream(r *http.Request, body []byte) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
-		upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.upstreamURL+"/v1/chat/completions", bytes.NewReader(body))
+		upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamEndpoint(h.upstreamURL, "/chat/completions"), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
@@ -132,6 +172,14 @@ func (h *handler) doUpstream(r *http.Request, body []byte) (*http.Response, erro
 			return nil, err
 		}
 	}
+}
+
+func upstreamEndpoint(baseURL, path string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(baseURL, "/v1") {
+		return baseURL + path
+	}
+	return baseURL + "/v1" + path
 }
 
 func waitForRetry(r *http.Request, delay time.Duration) error {

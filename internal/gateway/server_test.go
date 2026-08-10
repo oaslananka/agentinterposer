@@ -182,3 +182,104 @@ func TestHandlerLimitsConcurrentUpstreamRequests(t *testing.T) {
 		t.Fatalf("maximum concurrent upstream requests = %d, want <= 2", got)
 	}
 }
+
+func TestHandlerFlushesStreamingResponses(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\n"))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"nvidia/test","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if !response.Flushed {
+		t.Fatal("streaming response was not flushed")
+	}
+}
+
+func TestHandlerRejectsOversizedRequestsBeforeCallingUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     8,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("123456789"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("upstream calls = %d, want 0", got)
+	}
+}
+
+func TestNewHandlerRejectsInvalidUpstreamURL(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewHandler(Config{UpstreamURL: "://invalid"})
+	if err == nil {
+		t.Fatal("NewHandler() error = nil, want invalid upstream URL error")
+	}
+}
+
+func TestHandlerAcceptsUpstreamBaseURLWithV1Suffix(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL + "/v1",
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test","messages":[]}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("upstream path = %q, want /v1/chat/completions", gotPath)
+	}
+}

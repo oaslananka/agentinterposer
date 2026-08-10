@@ -1,0 +1,20 @@
+# Build outputs
+/agentinterposer
+/agentinterposer.exe
+/bin/
+/dist/
+
+# Test and coverage outputs
+*.cover
+coverage.out
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
