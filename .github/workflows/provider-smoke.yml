@@ -688,6 +688,7 @@ jobs:
             --no-save \
             --no-audit \
             --no-fund \
+            --ignore-scripts \
             @anthropic-ai/claude-code@2.1.226
           chmod -R a+rX "$root"
           claude_bin="$root/node_modules/.bin/claude"
@@ -941,10 +942,29 @@ jobs:
                           nested_types = []
                           if isinstance(nested, list):
                               nested_types = [str(item.get("type", "unknown")) for item in nested if isinstance(item, dict)]
+                          content_text = nested if isinstance(nested, str) else ""
+                          lowered = content_text.lower()
+                          error_classes = []
+                          for needle, label in [
+                              ("command not found", "command-not-found"),
+                              ("not found", "not-found"),
+                              ("permission denied", "permission"),
+                              ("operation not permitted", "sandbox"),
+                              ("exit code", "exit-code"),
+                              ("timed out", "timeout"),
+                              ("timeout", "timeout"),
+                              ("openssl", "openssl"),
+                              ("working directory", "working-directory"),
+                              ("no such file", "no-such-file"),
+                          ]:
+                              if needle in lowered and label not in error_classes:
+                                  error_classes.append(label)
                           tool_result_shapes.append(
                               "keys=" + "+".join(sorted(block))
                               + ";is_error=" + str(bool(block.get("is_error"))).lower()
                               + ";content_kind=" + type(nested).__name__
+                              + ";content_bytes=" + str(len(content_text.encode("utf-8")))
+                              + ";error_classes=" + ("+".join(error_classes) if error_classes else "other")
                               + ";nested_types=" + ("+".join(nested_types) if nested_types else "none")
                           )
                       elif block_type == "tool_use":
