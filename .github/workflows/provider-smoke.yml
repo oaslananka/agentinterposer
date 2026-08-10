@@ -321,6 +321,10 @@ jobs:
               if event_type and event_type not in event_types:
                   event_types.append(str(event_type))
               item = data.get("item")
+              if event_type == "response.output_item.added":
+                  output_item_added_shape = item_shape(item)
+              if event_type == "response.output_item.done":
+                  output_item_done_shape = item_shape(item)
               if isinstance(item, dict) and item.get("type") == "function_call":
                   function_call_seen = True
               if event_type == "response.completed":
@@ -672,7 +676,31 @@ jobs:
           function_name = None
           call_id_present = False
           argument_keys = []
+          output_item_added_shape = None
+          output_item_done_shape = None
+          completed_response_shape = None
           completed_seen = False
+
+          def value_type(value):
+              if value is None:
+                  return "null"
+              if isinstance(value, bool):
+                  return "bool"
+              if isinstance(value, str):
+                  return "string"
+              if isinstance(value, (int, float)):
+                  return "number"
+              if isinstance(value, list):
+                  return "array"
+              if isinstance(value, dict):
+                  return "object"
+              return type(value).__name__
+
+          def item_shape(item):
+              if not isinstance(item, dict):
+                  return {"value_type": value_type(item)}
+              selected = {key: value_type(item.get(key)) for key in ("type", "id", "name", "arguments", "call_id", "status") if key in item}
+              return {"keys": sorted(item.keys()), "types": selected}
           for raw in open(sys.argv[1], encoding="utf-8"):
               line = raw.strip()
               if line.startswith("event:"):
@@ -691,6 +719,10 @@ jobs:
               if event_type:
                   events.append(str(event_type))
               item = data.get("item")
+              if event_type == "response.output_item.added":
+                  output_item_added_shape = item_shape(item)
+              if event_type == "response.output_item.done":
+                  output_item_done_shape = item_shape(item)
               if isinstance(item, dict) and item.get("type") == "function_call":
                   function_name = item.get("name") or function_name
                   call_id_present = bool(item.get("call_id")) or call_id_present
@@ -713,7 +745,11 @@ jobs:
                           argument_keys = sorted(parsed.keys())
               if event_type == "response.completed":
                   completed_seen = True
+                  completed_response_shape = item_shape(data.get("response"))
           print("codex_exact_raw_events=" + ",".join(dict.fromkeys(events)))
+          print("codex_exact_raw_output_item_added_shape=" + json.dumps(output_item_added_shape, sort_keys=True, separators=(",", ":")))
+          print("codex_exact_raw_output_item_done_shape=" + json.dumps(output_item_done_shape, sort_keys=True, separators=(",", ":")))
+          print("codex_exact_raw_completed_response_shape=" + json.dumps(completed_response_shape, sort_keys=True, separators=(",", ":")))
           print("codex_exact_raw_function_name=" + str(function_name or "missing"))
           print("codex_exact_raw_call_id_present=" + str(call_id_present).lower())
           print("codex_exact_raw_argument_keys=" + ",".join(argument_keys))
@@ -756,7 +792,31 @@ jobs:
           function_name = None
           call_id_present = False
           argument_keys = []
+          output_item_added_shape = None
+          output_item_done_shape = None
+          completed_response_shape = None
           completed_seen = False
+
+          def value_type(value):
+              if value is None:
+                  return "null"
+              if isinstance(value, bool):
+                  return "bool"
+              if isinstance(value, str):
+                  return "string"
+              if isinstance(value, (int, float)):
+                  return "number"
+              if isinstance(value, list):
+                  return "array"
+              if isinstance(value, dict):
+                  return "object"
+              return type(value).__name__
+
+          def item_shape(item):
+              if not isinstance(item, dict):
+                  return {"value_type": value_type(item)}
+              selected = {key: value_type(item.get(key)) for key in ("type", "id", "name", "arguments", "call_id", "status") if key in item}
+              return {"keys": sorted(item.keys()), "types": selected}
           for raw in open(response_path, encoding="utf-8"):
               line = raw.strip()
               if line.startswith("event:"):
@@ -789,6 +849,7 @@ jobs:
                           argument_keys = sorted(parsed.keys())
               if event_type == "response.completed":
                   completed_seen = True
+                  completed_response_shape = item_shape(data.get("response"))
 
           def selected_headers(path):
               selected = {}
@@ -802,6 +863,9 @@ jobs:
               return selected
 
           print("codex_gateway_exact_events=" + ",".join(dict.fromkeys(events)))
+          print("codex_gateway_exact_output_item_added_shape=" + json.dumps(output_item_added_shape, sort_keys=True, separators=(",", ":")))
+          print("codex_gateway_exact_output_item_done_shape=" + json.dumps(output_item_done_shape, sort_keys=True, separators=(",", ":")))
+          print("codex_gateway_exact_completed_response_shape=" + json.dumps(completed_response_shape, sort_keys=True, separators=(",", ":")))
           print("codex_gateway_exact_function_name=" + str(function_name or "missing"))
           print("codex_gateway_exact_call_id_present=" + str(call_id_present).lower())
           print("codex_gateway_exact_argument_keys=" + ",".join(argument_keys))
