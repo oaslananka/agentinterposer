@@ -983,12 +983,11 @@ jobs:
           import subprocess
           import sys
           import threading
-          import time
           from http.server import BaseHTTPRequestHandler, HTTPServer
 
           response_path, summary_path, claude_bin, claude_user, replay_home, model, proof, prompt = sys.argv[1:]
           first_response = open(response_path, "rb").read()
-          state = {"messages": 0, "is_error": None, "content_bytes": None}
+          state = {"messages": 0, "is_error": None, "content_bytes": None, "first_request": None}
 
           def final_stream():
               events = [
@@ -1024,6 +1023,7 @@ jobs:
 
                   state["messages"] += 1
                   if state["messages"] == 1:
+                      state["first_request"] = data
                       body = first_response
                   else:
                       results = []
@@ -1042,15 +1042,8 @@ jobs:
                   self.send_header("Content-Type", "text/event-stream")
                   self.send_header("Connection", "close")
                   self.end_headers()
-                  if state["messages"] == 1:
-                      time.sleep(20.0)
-                      for offset in range(0, len(first_response), 7):
-                          self.wfile.write(first_response[offset:offset + 7])
-                          self.wfile.flush()
-                          time.sleep(0.002)
-                  else:
-                      self.wfile.write(body)
-                      self.wfile.flush()
+                  self.wfile.write(body)
+                  self.wfile.flush()
                   self.close_connection = True
 
           server = HTTPServer(("127.0.0.1", 0), Handler)
@@ -1084,16 +1077,23 @@ jobs:
                   cwd=replay_home + "/work",
                   stdout=subprocess.DEVNULL,
                   stderr=subprocess.DEVNULL,
-                  timeout=90,
+                  timeout=60,
               )
           finally:
               server.shutdown()
+          live_request_path = os.path.join(os.path.dirname(response_path), "request_1.json")
+          live_request = json.load(open(live_request_path, encoding="utf-8"))
+          replay_request = state["first_request"] if isinstance(state["first_request"], dict) else {}
+          sections = ["model", "max_tokens", "stream", "messages", "tools", "system", "metadata", "tool_choice"]
+          comparison = {name: live_request.get(name) == replay_request.get(name) for name in sections}
+          comparison["top_level_keys"] = sorted(live_request) == sorted(replay_request)
           with open(summary_path, "w", encoding="utf-8") as handle:
               json.dump({
                   "exit": proc.returncode,
                   "messages": state["messages"],
                   "is_error": state["is_error"],
                   "content_bytes": state["content_bytes"],
+                  "request_comparison": comparison,
               }, handle)
           PY
             python3 "$claude_replay" \
@@ -1109,11 +1109,14 @@ jobs:
           import json
           import sys
           data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=prebyte-20s-7byte-progressive-exact-prompt")
+          print("claude_code_replay_framing=buffered-exact-prompt-request-compare")
           print("claude_code_replay_exit=" + str(data.get("exit")))
           print("claude_code_replay_message_requests=" + str(data.get("messages")))
           print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
           print("claude_code_replay_tool_result_content_bytes=" + str(data.get("content_bytes")))
+          comparison = data.get("request_comparison", {})
+          for name in ["top_level_keys", "model", "max_tokens", "stream", "messages", "tools", "system", "metadata", "tool_choice"]:
+              print("claude_code_request_equal_" + name + "=" + str(bool(comparison.get(name))).lower())
           PY
             rm -rf "$replay_home"
             rm -f "$replay_summary"
