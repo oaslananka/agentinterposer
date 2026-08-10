@@ -418,6 +418,9 @@ jobs:
           capture_request="$RUNNER_TEMP/codex-captured-request.json"
           capture_home="$RUNNER_TEMP/codex-capture-home"
           exact_response="$RUNNER_TEMP/codex-exact-response.sse"
+          gateway_exact_response="$RUNNER_TEMP/codex-gateway-exact-response.sse"
+          direct_headers="$RUNNER_TEMP/codex-direct-response.headers"
+          gateway_headers="$RUNNER_TEMP/codex-gateway-response.headers"
           pid=''
           capture_pid=''
           capture_gateway_pid=''
@@ -640,6 +643,7 @@ jobs:
           set +e
           exact_http="$(curl --silent --show-error --no-buffer \
             --max-time 90 \
+            --dump-header "$direct_headers" \
             --output "$exact_response" \
             --write-out '%{http_code}' \
             --request POST \
@@ -665,7 +669,9 @@ jobs:
           import sys
 
           events = []
-          function_call_seen = False
+          function_name = None
+          call_id_present = False
+          argument_keys = []
           completed_seen = False
           for raw in open(sys.argv[1], encoding="utf-8"):
               line = raw.strip()
@@ -686,15 +692,126 @@ jobs:
                   events.append(str(event_type))
               item = data.get("item")
               if isinstance(item, dict) and item.get("type") == "function_call":
-                  function_call_seen = True
+                  function_name = item.get("name") or function_name
+                  call_id_present = bool(item.get("call_id")) or call_id_present
+                  arguments = item.get("arguments")
+                  if isinstance(arguments, str) and arguments:
+                      try:
+                          parsed = json.loads(arguments)
+                      except Exception:
+                          parsed = None
+                      if isinstance(parsed, dict):
+                          argument_keys = sorted(parsed.keys())
+              if event_type == "response.function_call_arguments.done":
+                  arguments = data.get("arguments")
+                  if isinstance(arguments, str):
+                      try:
+                          parsed = json.loads(arguments)
+                      except Exception:
+                          parsed = None
+                      if isinstance(parsed, dict):
+                          argument_keys = sorted(parsed.keys())
               if event_type == "response.completed":
                   completed_seen = True
           print("codex_exact_raw_events=" + ",".join(dict.fromkeys(events)))
+          print("codex_exact_raw_function_name=" + str(function_name or "missing"))
+          print("codex_exact_raw_call_id_present=" + str(call_id_present).lower())
+          print("codex_exact_raw_argument_keys=" + ",".join(argument_keys))
           if not completed_seen:
               raise SystemExit("Exact Codex request emitted no response.completed event")
-          if not function_call_seen:
+          if not function_name:
               raise SystemExit("Exact Codex request emitted no function_call item")
           print("codex_exact_raw_function_call=ok")
+          PY
+
+          set +e
+          gateway_exact_http="$(curl --silent --show-error --no-buffer \
+            --max-time 90 \
+            --dump-header "$gateway_headers" \
+            --output "$gateway_exact_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/responses' \
+            --header 'Content-Type: application/json' \
+            --data-binary "@$capture_request")"
+          gateway_exact_curl_status=$?
+          set -e
+          echo "codex_gateway_exact_curl_exit=${gateway_exact_curl_status}"
+          echo "codex_gateway_exact_http=${gateway_exact_http}"
+          if [ "$gateway_exact_curl_status" -ne 0 ]; then
+            echo 'Exact Codex request timed out through AgentInterposer.' >&2
+            exit "$gateway_exact_curl_status"
+          fi
+          if [[ ! "$gateway_exact_http" =~ ^2 ]]; then
+            echo 'Exact Codex request through AgentInterposer returned a non-2xx status.' >&2
+            exit 1
+          fi
+
+          python3 - "$gateway_exact_response" "$direct_headers" "$gateway_headers" <<'PY'
+          import json
+          import sys
+
+          response_path, direct_header_path, gateway_header_path = sys.argv[1:]
+          events = []
+          function_name = None
+          call_id_present = False
+          argument_keys = []
+          completed_seen = False
+          for raw in open(response_path, encoding="utf-8"):
+              line = raw.strip()
+              if line.startswith("event:"):
+                  events.append(line.split(":", 1)[1].strip())
+                  continue
+              if not line.startswith("data:"):
+                  continue
+              payload = line.split(":", 1)[1].strip()
+              if payload == "[DONE]":
+                  continue
+              try:
+                  data = json.loads(payload)
+              except Exception:
+                  continue
+              event_type = data.get("type")
+              if event_type:
+                  events.append(str(event_type))
+              item = data.get("item")
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  function_name = item.get("name") or function_name
+                  call_id_present = bool(item.get("call_id")) or call_id_present
+              if event_type == "response.function_call_arguments.done":
+                  arguments = data.get("arguments")
+                  if isinstance(arguments, str):
+                      try:
+                          parsed = json.loads(arguments)
+                      except Exception:
+                          parsed = None
+                      if isinstance(parsed, dict):
+                          argument_keys = sorted(parsed.keys())
+              if event_type == "response.completed":
+                  completed_seen = True
+
+          def selected_headers(path):
+              selected = {}
+              for raw in open(path, encoding="utf-8", errors="replace"):
+                  if ":" not in raw:
+                      continue
+                  key, value = raw.split(":", 1)
+                  key = key.strip().lower()
+                  if key in {"content-type", "cache-control", "content-encoding", "transfer-encoding", "connection", "x-accel-buffering"}:
+                      selected[key] = value.strip()
+              return selected
+
+          print("codex_gateway_exact_events=" + ",".join(dict.fromkeys(events)))
+          print("codex_gateway_exact_function_name=" + str(function_name or "missing"))
+          print("codex_gateway_exact_call_id_present=" + str(call_id_present).lower())
+          print("codex_gateway_exact_argument_keys=" + ",".join(argument_keys))
+          print("codex_direct_selected_headers=" + json.dumps(selected_headers(direct_header_path), sort_keys=True, separators=(",", ":")))
+          print("codex_gateway_selected_headers=" + json.dumps(selected_headers(gateway_header_path), sort_keys=True, separators=(",", ":")))
+          if not completed_seen:
+              raise SystemExit("Gateway exact Codex request emitted no response.completed event")
+          if not function_name:
+              raise SystemExit("Gateway exact Codex request emitted no function_call item")
+          print("codex_gateway_exact_function_call=ok")
           PY
 
           set +e
