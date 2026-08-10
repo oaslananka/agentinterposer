@@ -852,7 +852,7 @@ jobs:
 
           sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
           sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
-          printf '%s\n' '{"permissions":{"allow":["Bash(cat proof.txt)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
+          printf '%s\n' '{"permissions":{"allow":["Bash(cat /tmp/agentinterposer-claude-home/work/proof.txt)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
           sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-code-settings.json" "$claude_settings"
           rm -f "$RUNNER_TEMP/claude-code-settings.json"
           shell_pid=$$
@@ -881,10 +881,15 @@ jobs:
           PY
           sudo install -o "$claude_user" -g "$claude_user" -m 0400 "$proof_tmp" "$claude_home/work/proof.txt"
           rm -f "$proof_tmp"
+          if ! sudo -u "$claude_user" env -i PATH='/usr/bin:/bin' cat "$claude_home/work/proof.txt" >/dev/null; then
+            echo 'Claude Code proof file is not readable by the certification user.' >&2
+            exit 1
+          fi
+          echo 'claude_code_proof_file_readable=ok'
           echo 'claude_code_os_user_isolation=ok'
           echo 'claude_code_secret_environment_isolation=ok'
 
-          prompt=$'Use Bash exactly once to read the random certification proof stored in the working directory. The proof value is not present in this prompt and your final answer will be validated against the tool output. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\ncat proof.txt\nEND_COMMAND\nAfter the command completes, reply with exactly the value from stdout and no other text.'
+          prompt=$'Use Bash exactly once to read the random certification proof stored in the working directory. The proof value is not present in this prompt and your final answer will be validated against the tool output. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\ncat /tmp/agentinterposer-claude-home/work/proof.txt\nEND_COMMAND\nAfter the command completes, reply with exactly the value from stdout and no other text.'
           set +e
           (
             cd "$claude_home/work"
@@ -1051,7 +1056,7 @@ jobs:
                   for child in value:
                       yield from walk(child)
 
-          expected = "cat proof.txt"
+          expected = "cat /tmp/agentinterposer-claude-home/work/proof.txt"
           bash_commands = []
           for event in events:
               for obj in walk(event):
@@ -1068,7 +1073,7 @@ jobs:
               print("claude_code_bash_command_exact=" + str(command == expected).lower())
               print("claude_code_bash_command_trimmed_exact=" + str(trimmed == expected).lower())
               print("claude_code_bash_command_starts_expected=" + str(trimmed.startswith(expected)).lower())
-              print("claude_code_bash_command_contains_uuid_path=" + str("proof.txt" in command).lower())
+              print("claude_code_bash_command_contains_uuid_path=" + str("/tmp/agentinterposer-claude-home/work/proof.txt" in command).lower())
               print("claude_code_bash_command_has_newline=" + str("\n" in command or "\r" in command).lower())
               print("claude_code_bash_command_has_pipe=" + str("|" in command).lower())
               print("claude_code_bash_command_has_redirect=" + str(">" in command or "<" in command).lower())
@@ -1084,7 +1089,7 @@ jobs:
               except Exception:
                   tokens = []
               print("claude_code_bash_command_token_count=" + str(len(tokens)))
-              print("claude_code_bash_command_semantic_exact=" + str(tokens == ["cat", "proof.txt"]).lower())
+              print("claude_code_bash_command_semantic_exact=" + str(tokens == ["cat", "/tmp/agentinterposer-claude-home/work/proof.txt"]).lower())
 
           permission_events = [
               event for event in events
@@ -1165,7 +1170,7 @@ jobs:
                   for child in value:
                       yield from walk(child)
 
-          command = "cat proof.txt"
+          command = "cat /tmp/agentinterposer-claude-home/work/proof.txt"
           tool_uses = []
           tool_results = []
           for event in events:
