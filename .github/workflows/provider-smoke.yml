@@ -16,7 +16,7 @@ jobs:
   nvidia-hosted:
     name: nvidia-hosted
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Validate Doppler bootstrap token
@@ -259,12 +259,126 @@ jobs:
           print("agentinterposer_responses_schema=ok")
           PY
 
+      - name: Probe Codex Responses tool round trip
+        id: codex
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          codex_root="$RUNNER_TEMP/codex-cli"
+          codex_home="$RUNNER_TEMP/codex-home"
+          binary="$RUNNER_TEMP/agentinterposer-codex"
+          gateway_log="$RUNNER_TEMP/agentinterposer-codex.log"
+          codex_jsonl="$RUNNER_TEMP/codex-events.jsonl"
+          codex_stderr="$RUNNER_TEMP/codex-stderr.log"
+          final_message="$RUNNER_TEMP/codex-final.txt"
+          proof_file="$GITHUB_WORKSPACE/.agentinterposer-codex-proof"
+          pid=''
+
+          cleanup() {
+            rm -f "$proof_file"
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          mkdir -p "$codex_root" "$codex_home"
+          npm install --prefix "$codex_root" --no-audit --no-fund --silent '@openai/codex@0.147.0'
+          codex="$codex_root/node_modules/.bin/codex"
+          codex_version="$($codex --version)"
+          if [ "$codex_version" != 'codex-cli 0.147.0' ]; then
+            echo "Unexpected Codex version: $codex_version" >&2
+            exit 1
+          fi
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$gateway_log" 2>&1 &
+          pid=$!
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for the Codex probe.' >&2
+            exit 1
+          fi
+
+          proof="AGENTINTERPOSER_CODEX_TOOL_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+          printf '%s\n' "$proof" > "$proof_file"
+
+          python3 - "$codex_home/config.toml" "$MODEL" <<'PY'
+          import json
+          import sys
+
+          path, model = sys.argv[1], sys.argv[2]
+          with open(path, "w", encoding="utf-8") as handle:
+              handle.write(f"model = {json.dumps(model)}\n")
+              handle.write('model_provider = "agentinterposer"\n')
+              handle.write('approval_policy = "never"\n')
+              handle.write('sandbox_mode = "read-only"\n')
+              handle.write('web_search = "disabled"\n\n')
+              handle.write('[agents]\n')
+              handle.write('enabled = false\n\n')
+              handle.write('[model_providers.agentinterposer]\n')
+              handle.write('name = "AgentInterposer certification"\n')
+              handle.write('base_url = "http://127.0.0.1:11435/v1"\n')
+              handle.write('env_key = "AGENTINTERPOSER_CLIENT_KEY"\n')
+              handle.write('wire_api = "responses"\n')
+              handle.write('request_max_retries = 0\n')
+              handle.write('stream_max_retries = 0\n')
+          PY
+
+          prompt="Use the shell tool to read the exact contents of $proof_file. Then reply with exactly the file contents and nothing else. Do not guess or infer the contents."
+          set +e
+          CODEX_HOME="$codex_home" \
+            AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
+            "$codex" exec \
+              --ephemeral \
+              --sandbox read-only \
+              --ignore-rules \
+              --json \
+              --output-last-message "$final_message" \
+              "$prompt" >"$codex_jsonl" 2>"$codex_stderr"
+          codex_status=$?
+          set -e
+
+          echo "codex_cli_version=$codex_version"
+          echo "codex_exit=$codex_status"
+          if [ "$codex_status" -ne 0 ]; then
+            echo 'Codex Responses compatibility probe failed.' >&2
+            tail -n 30 "$codex_stderr" >&2 || true
+            exit "$codex_status"
+          fi
+
+          actual="$(tr -d '\r\n' < "$final_message")"
+          if [ "$actual" != "$proof" ]; then
+            echo 'Codex final response did not match the shell-only proof value.' >&2
+            exit 1
+          fi
+
+          echo 'codex_responses_streaming=ok'
+          echo 'codex_function_call_round_trip=ok'
+          echo 'codex_reasoning_request=ok'
+          echo 'codex_verified=true' >> "$GITHUB_OUTPUT"
+
       - name: Write compatibility summary
         shell: bash
         env:
           MODEL: ${{ inputs.model }}
           RESPONSES_SUPPORTED: ${{ steps.responses.outputs.responses_supported }}
           MESSAGES_SUPPORTED: ${{ steps.messages.outputs.messages_supported }}
+          CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
         run: |
           {
             echo '## NVIDIA hosted compatibility probe'
@@ -274,4 +388,6 @@ jobs:
             echo "- Responses API: ${RESPONSES_SUPPORTED:-unknown}"
             echo "- Anthropic Messages API: ${MESSAGES_SUPPORTED:-unknown}"
             echo '- AgentInterposer Responses passthrough: verified'
+            echo "- Codex CLI 0.147.0 Responses tool round trip: ${CODEX_VERIFIED:-unknown}"
+            echo '- Codex NVIDIA profile: web search disabled; multi-agent namespace disabled'
           } >> "$GITHUB_STEP_SUMMARY"

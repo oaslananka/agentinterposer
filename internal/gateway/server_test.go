@@ -373,3 +373,83 @@ func TestHandlerFlushesStreamingResponsesAPI(t *testing.T) {
 		t.Fatal("Responses API stream was not flushed")
 	}
 }
+
+func TestHandlerForwardsCodexResponsesFunctionOutputWithoutTranslation(t *testing.T) {
+	t.Parallel()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_codex","object":"response","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	const body = `{"client_metadata":{"originator":"codex_cli_rs"},"include":["reasoning.encrypted_content"],"input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"Use tools when needed."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Read the proof file."}]},{"type":"function_call_output","call_id":"call_test","output":"proof-value"}],"instructions":"Coding agent instructions","model":"nvidia/nemotron-3-super-120b-a12b","parallel_tool_calls":false,"prompt_cache_key":"codex-test","reasoning":{"summary":"auto"},"store":false,"stream":true,"tool_choice":"auto","tools":[{"type":"function","name":"exec_command","description":"Run a command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer client-token")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("Codex Responses body changed in transit\ngot:  %s\nwant: %s", gotBody, body)
+	}
+}
+
+func TestHandlerPreservesCodexFunctionCallStreamingEvents(t *testing.T) {
+	t.Parallel()
+
+	const events = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_test\",\"name\":\"exec_command\",\"arguments\":\"\"}}\n\n" +
+		"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call_test\",\"delta\":\"{\\\"cmd\\\":\\\"printf proof\\\"}\"}\n\n" +
+		"event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"call_id\":\"call_test\",\"arguments\":\"{\\\"cmd\\\":\\\"printf proof\\\"}\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"object\":\"response\",\"output\":[]}}\n\n"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(events))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"nvidia/test","stream":true,"input":"use a tool"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !response.Flushed {
+		t.Fatal("Codex function-call stream was not flushed")
+	}
+	if got := response.Body.String(); got != events {
+		t.Fatalf("Codex function-call stream changed in transit\ngot:  %q\nwant: %q", got, events)
+	}
+}
