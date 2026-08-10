@@ -806,32 +806,86 @@ jobs:
           set -e
           echo "claude_code_exit=${claude_exit}"
           if [ "$claude_exit" -ne 0 ]; then
+            if [ -f "$proof_file" ]; then
+              echo 'claude_code_proof_file_present=true'
+              echo "claude_code_proof_line_count=$(wc -l < "$proof_file")"
+            else
+              echo 'claude_code_proof_file_present=false'
+              echo 'claude_code_proof_line_count=0'
+            fi
             python3 - "$claude_output" "$claude_stderr" <<'PY'
           import json
           import os
+          import re
           import sys
 
           output_path, stderr_path = sys.argv[1:]
+
+          def classify(text):
+              text = text.lower()
+              labels = []
+              for needle, label in [
+                  ("permission", "permission"),
+                  ("denied", "permission"),
+                  ("invalid_request", "invalid-request"),
+                  ("invalid request", "invalid-request"),
+                  ("cache_control", "cache-control"),
+                  ("metadata", "metadata"),
+                  ("tool_result", "tool-result"),
+                  ("tool result", "tool-result"),
+                  ("tool_use", "tool-use"),
+                  ("tool use", "tool-use"),
+                  ("rate limit", "rate-limit"),
+                  ("rate_limit", "rate-limit"),
+                  ("overloaded", "overloaded"),
+                  ("server error", "server-error"),
+                  ("api error", "api-error"),
+                  ("authentication", "auth"),
+                  ("unauthorized", "auth"),
+                  ("model", "model"),
+                  ("connection", "connection"),
+                  ("timeout", "timeout"),
+                  ("max turns", "max-turns"),
+                  ("max_turns", "max-turns"),
+              ]:
+                  if needle in text and label not in labels:
+                      labels.append(label)
+              return labels
+
           if os.path.getsize(output_path):
               try:
                   data = json.load(open(output_path, encoding="utf-8"))
               except Exception:
                   print("claude_code_output=non-json")
               else:
+                  print("claude_code_output_keys=" + ",".join(sorted(data)))
+                  print("claude_code_subtype=" + str(data.get("subtype", "unknown")))
                   print("claude_code_is_error=" + str(bool(data.get("is_error"))).lower())
                   print("claude_code_num_turns=" + str(data.get("num_turns", "unknown")))
+                  print("claude_code_api_error_status=" + str(data.get("api_error_status", "none")))
+                  print("claude_code_terminal_reason=" + str(data.get("terminal_reason", "none")))
+
+                  denials = data.get("permission_denials")
+                  if not isinstance(denials, list):
+                      denials = []
+                  print("claude_code_permission_denials_count=" + str(len(denials)))
+                  tool_names = []
+                  for denial in denials:
+                      if not isinstance(denial, dict):
+                          continue
+                      name = denial.get("tool_name") or denial.get("name")
+                      if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", name) and name not in tool_names:
+                          tool_names.append(name)
+                  print("claude_code_permission_denied_tools=" + (",".join(tool_names) if tool_names else "none"))
+
+                  error_text = " " .join(str(item) for item in data.get("errors", []) if isinstance(item, str))
+                  result_text = data.get("result") if isinstance(data.get("result"), str) else ""
+                  classes = classify(error_text + " " + result_text)
+                  print("claude_code_output_error_classes=" + (",".join(classes) if classes else "other"))
+
           if os.path.getsize(stderr_path):
-              text = open(stderr_path, encoding="utf-8", errors="replace").read().lower()
-              classes = []
-              for needle, label in [
-                  ("permission", "permission"),
-                  ("api error", "api-error"),
-                  ("timeout", "timeout"),
-                  ("model", "model"),
-                  ("connection", "connection"),
-              ]:
-                  if needle in text:
-                      classes.append(label)
+              text = open(stderr_path, encoding="utf-8", errors="replace").read()
+              classes = classify(text)
               print("claude_code_stderr_classes=" + (",".join(classes) if classes else "other"))
           PY
             exit 1
