@@ -259,6 +259,68 @@ jobs:
           print("agentinterposer_responses_schema=ok")
           PY
 
+      - name: Probe Responses function call
+        id: responses_tool
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          trap 'rm -f "$body"' EXIT
+
+          set +e
+          status="$(curl --silent --show-error \
+            --max-time 90 \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'https://integrate.api.nvidia.com/v1/responses' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "input": "Call proof_reader with value ping. Do not answer directly.", "tools": [{"type": "function", "name": "proof_reader", "description": "Return a proof value", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"], "additionalProperties": False}}], "tool_choice": "required", "parallel_tool_calls": False, "max_output_tokens": 256, "stream": False}))')")"
+          curl_status=$?
+          set -e
+
+          echo "responses_tool_curl_exit=${curl_status}"
+          echo "responses_tool_http=${status}"
+          if [ "$curl_status" -ne 0 ]; then
+            echo 'Responses function-call probe timed out or failed at the transport layer.' >&2
+            exit "$curl_status"
+          fi
+          if [[ ! "$status" =~ ^2 ]]; then
+            python3 - "$body" <<'PY'
+          import json, sys
+          try:
+              data = json.load(open(sys.argv[1], encoding="utf-8"))
+          except Exception:
+              print("responses_tool_error=non-json-response")
+              raise SystemExit(0)
+          error = data.get("error")
+          if isinstance(error, dict):
+              print("responses_tool_error=" + str(error.get("message") or error.get("type") or "provider-error")[:240])
+          else:
+              print("responses_tool_error=" + str(data.get("detail") or data.get("title") or "provider-error")[:240])
+          PY
+            exit 1
+          fi
+
+          python3 - "$body" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          output = data.get("output") or []
+          calls = [item for item in output if isinstance(item, dict) and item.get("type") == "function_call"]
+          if not calls:
+              raise SystemExit("Responses function-call probe returned no function_call output item")
+          if calls[0].get("name") != "proof_reader":
+              raise SystemExit("Responses function-call probe called an unexpected function")
+          if not calls[0].get("call_id"):
+              raise SystemExit("Responses function-call probe returned no call_id")
+          print("responses_function_call=ok")
+          PY
+          echo 'responses_tool_verified=true' >> "$GITHUB_OUTPUT"
+
       - name: Probe Codex Responses tool round trip
         id: codex
         shell: bash
@@ -366,6 +428,7 @@ jobs:
 
           path = sys.argv[1]
           counts = {}
+          item_counts = {}
           errors = []
           try:
               lines = open(path, encoding="utf-8")
@@ -378,6 +441,10 @@ jobs:
                   continue
               event_type = str(event.get("type") or "unknown")
               counts[event_type] = counts.get(event_type, 0) + 1
+              item = event.get("item")
+              if isinstance(item, dict):
+                  item_type = str(item.get("type") or "unknown")
+                  item_counts[item_type] = item_counts.get(item_type, 0) + 1
               error = event.get("error")
               if isinstance(error, dict):
                   message = error.get("message") or error.get("type")
@@ -386,6 +453,7 @@ jobs:
               elif error:
                   errors.append(str(error)[:240])
           print("codex_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)), file=sys.stderr)
+          print("codex_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)), file=sys.stderr)
           for message in errors[-3:]:
               print("codex_event_error=" + message, file=sys.stderr)
           PY
@@ -411,6 +479,7 @@ jobs:
           RESPONSES_SUPPORTED: ${{ steps.responses.outputs.responses_supported }}
           MESSAGES_SUPPORTED: ${{ steps.messages.outputs.messages_supported }}
           CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
+          RESPONSES_TOOL_VERIFIED: ${{ steps.responses_tool.outputs.responses_tool_verified }}
         run: |
           {
             echo '## NVIDIA hosted compatibility probe'
@@ -420,6 +489,7 @@ jobs:
             echo "- Responses API: ${RESPONSES_SUPPORTED:-unknown}"
             echo "- Anthropic Messages API: ${MESSAGES_SUPPORTED:-unknown}"
             echo '- AgentInterposer Responses passthrough: verified'
+            echo "- Responses function call: ${RESPONSES_TOOL_VERIFIED:-unknown}"
             echo "- Codex CLI 0.147.0 Responses tool round trip: ${CODEX_VERIFIED:-unknown}"
             echo '- Codex NVIDIA profile: web search disabled; multi-agent namespace disabled'
           } >> "$GITHUB_STEP_SUMMARY"
