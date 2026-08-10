@@ -30,24 +30,23 @@ jobs:
             exit 1
           fi
 
-      - name: Fetch runtime secrets from Doppler
-        id: doppler
-        uses: DopplerHQ/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
-        with:
-          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
-          doppler-project: oaslananka-ops
-          doppler-config: runtime
+      - name: Install Doppler CLI
+        uses: DopplerHQ/cli-action@12f29f902bf9279a3888501b9d27ba9f968a07c2 # v4.0.1
 
-      - name: Validate NVIDIA credential from Doppler
+      - name: Fetch NVIDIA credential from Doppler
+        id: doppler
         shell: bash
         env:
-          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${NVIDIA_API_KEY:-}" ]; then
+          value="$(doppler secrets get NVIDIA_API_KEY --plain --project oaslananka-ops --config runtime)"
+          if [ -z "$value" ]; then
             echo "NVIDIA_API_KEY was not returned by Doppler." >&2
             exit 1
           fi
+          echo "::add-mask::$value"
+          printf 'NVIDIA_API_KEY=%s\n' "$value" >> "$GITHUB_OUTPUT"
 
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
