@@ -983,6 +983,7 @@ jobs:
           import subprocess
           import sys
           import threading
+          import time
           from http.server import BaseHTTPRequestHandler, HTTPServer
 
           response_path, summary_path, claude_bin, claude_user, replay_home, model, proof = sys.argv[1:]
@@ -1041,8 +1042,17 @@ jobs:
                   self.send_header("Content-Type", "text/event-stream")
                   self.send_header("Connection", "close")
                   self.end_headers()
-                  self.wfile.write(body)
-                  self.wfile.flush()
+                  if state["messages"] == 1:
+                      frames = first_response.split(b"\n\n")
+                      for index, frame in enumerate(frames):
+                          if not frame and index == len(frames) - 1:
+                              continue
+                          self.wfile.write(frame + b"\n\n")
+                          self.wfile.flush()
+                          time.sleep(0.05)
+                  else:
+                      self.wfile.write(body)
+                      self.wfile.flush()
                   self.close_connection = True
 
           server = HTTPServer(("127.0.0.1", 0), Handler)
@@ -1101,7 +1111,7 @@ jobs:
           import json
           import sys
           data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=close-delimited")
+          print("claude_code_replay_framing=event-progressive-50ms")
           print("claude_code_replay_exit=" + str(data.get("exit")))
           print("claude_code_replay_message_requests=" + str(data.get("messages")))
           print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
