@@ -485,6 +485,7 @@ jobs:
               AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
               "$codex" exec \
                 --ephemeral \
+                --skip-git-repo-check \
                 --sandbox read-only \
                 --ignore-rules \
                 --json \
