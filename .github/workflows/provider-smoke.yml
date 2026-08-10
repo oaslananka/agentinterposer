@@ -894,6 +894,150 @@ jobs:
               handle.write(text)
           PY
 
+          replay_home="$RUNNER_TEMP/codex-replay-home"
+          replay_ready="$RUNNER_TEMP/codex-replay-ready"
+          replay_first_request="$RUNNER_TEMP/codex-replay-request-1.json"
+          replay_second_request="$RUNNER_TEMP/codex-replay-request-2.json"
+          replay_jsonl="$RUNNER_TEMP/codex-replay-events.jsonl"
+          replay_stderr="$RUNNER_TEMP/codex-replay-stderr.log"
+          replay_pid=''
+          mkdir -p "$replay_home"
+
+          python3 - "$codex_home/config.toml" "$replay_home/config.toml" <<'PYREPLAYCFG'
+          import sys
+
+          source, target = sys.argv[1], sys.argv[2]
+          text = open(source, encoding="utf-8").read()
+          text = text.replace('name = "AgentInterposer certification"', 'name = "NVIDIA SSE replay diagnostic"')
+          text = text.replace('base_url = "http://127.0.0.1:11435/v1"', 'base_url = "http://127.0.0.1:11436/v1"')
+          text = text.replace('env_key = "AGENTINTERPOSER_CLIENT_KEY"', 'env_key = "REPLAY_CLIENT_KEY"')
+          with open(target, "w", encoding="utf-8") as handle:
+              handle.write(text)
+          PYREPLAYCFG
+
+          python3 - "$exact_response" "$replay_ready" "$replay_first_request" "$replay_second_request" <<'PYREPLAY' &
+          import http.server
+          import pathlib
+          import sys
+
+          response_path, ready_path, first_path, second_path = map(pathlib.Path, sys.argv[1:])
+          response_bytes = response_path.read_bytes()
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              count = 0
+
+              def log_message(self, _format, *_args):
+                  return
+
+              def do_POST(self):
+                  length = int(self.headers.get("Content-Length", "0"))
+                  body = self.rfile.read(length)
+                  type(self).count += 1
+                  if type(self).count == 1:
+                      first_path.write_bytes(body)
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                      self.send_header("Cache-Control", "no-cache")
+                      self.end_headers()
+                      self.wfile.write(response_bytes)
+                      self.wfile.flush()
+                      return
+                  second_path.write_bytes(body)
+                  payload = b'{"error":{"message":"replay diagnostic complete"}}\n'
+                  self.send_response(500)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(payload)))
+                  self.end_headers()
+                  self.wfile.write(payload)
+
+          server = http.server.ThreadingHTTPServer(("127.0.0.1", 11436), Handler)
+          ready_path.write_text("ready", encoding="utf-8")
+          server.serve_forever()
+          PYREPLAY
+          replay_pid=$!
+
+          for _ in {1..50}; do
+            if [ -s "$replay_ready" ]; then
+              break
+            fi
+            sleep 0.1
+          done
+          if [ ! -s "$replay_ready" ]; then
+            echo 'Codex SSE replay server did not become ready.' >&2
+            exit 1
+          fi
+
+          set +e
+          timeout --signal=TERM --kill-after=5s 45s \
+            env CODEX_HOME="$replay_home" \
+            REPLAY_CLIENT_KEY='local-replay-placeholder' \
+            "$codex" exec \
+              --ephemeral \
+              --sandbox read-only \
+              --ignore-rules \
+              --json \
+              "$prompt" >"$replay_jsonl" 2>"$replay_stderr"
+          replay_codex_status=$?
+          set -e
+
+          kill "$replay_pid" 2>/dev/null || true
+          wait "$replay_pid" 2>/dev/null || true
+          replay_pid=''
+          echo "codex_replay_exit=${replay_codex_status}"
+
+          python3 - "$exact_response" "$replay_first_request" "$replay_second_request" "$replay_jsonl" <<'PYREPLAYCHECK'
+          import json
+          import pathlib
+          import sys
+
+          response_path, first_path, second_path, jsonl_path = map(pathlib.Path, sys.argv[1:])
+          if not first_path.is_file():
+              raise SystemExit("Codex replay sent no first Responses request")
+          if not second_path.is_file():
+              raise SystemExit("Codex did not send a second request after the replayed NVIDIA function-call stream")
+
+          call_id = None
+          for raw in response_path.read_text(encoding="utf-8").splitlines():
+              if not raw.startswith("data:"):
+                  continue
+              payload = raw.split(":", 1)[1].strip()
+              if payload == "[DONE]":
+                  continue
+              try:
+                  event = json.loads(payload)
+              except Exception:
+                  continue
+              if event.get("type") != "response.output_item.done":
+                  continue
+              item = event.get("item")
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  call_id = item.get("call_id")
+                  break
+          if not isinstance(call_id, str) or not call_id:
+              raise SystemExit("Replay source contained no completed function_call call_id")
+
+          second = json.loads(second_path.read_text(encoding="utf-8"))
+          inputs = second.get("input") or []
+          outputs = [item for item in inputs if isinstance(item, dict) and item.get("type") == "function_call_output"]
+          if not outputs:
+              raise SystemExit("Codex replay second request contained no function_call_output")
+          if not any(item.get("call_id") == call_id for item in outputs):
+              raise SystemExit("Codex replay function_call_output did not match the NVIDIA call_id")
+
+          counts = {}
+          if jsonl_path.is_file():
+              for raw in jsonl_path.read_text(encoding="utf-8").splitlines():
+                  try:
+                      event = json.loads(raw)
+                  except Exception:
+                      continue
+                  event_type = str(event.get("type") or "unknown")
+                  counts[event_type] = counts.get(event_type, 0) + 1
+          print("codex_replay_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)))
+          print("codex_replay_second_request=true")
+          print("codex_replay_function_call_output=true")
+          PYREPLAYCHECK
+
           set +e
           timeout --signal=TERM --kill-after=10s 120s \
             env CODEX_HOME="$direct_home" \
