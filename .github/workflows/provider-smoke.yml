@@ -355,7 +355,7 @@ jobs:
                       "description": "NVIDIA hosted tool-use model",
                       "default_reasoning_level": None,
                       "supported_reasoning_levels": [],
-                      "shell_type": "default",
+                      "shell_type": "shell_command",
                       "visibility": "none",
                       "minimal_client_version": [0, 147, 0],
                       "supported_in_api": True,
@@ -403,6 +403,13 @@ jobs:
               handle.write('model_reasoning_summary = "none"\n')
               handle.write(f"model_catalog_json = {json.dumps(catalog_path)}\n\n")
               handle.write('[agents]\n')
+              handle.write('enabled = false\n\n')
+              handle.write('[features]\n')
+              handle.write('view_image = false\n')
+              handle.write('unified_exec = false\n\n')
+              handle.write('[tools.experimental_request_user_input]\n')
+              handle.write('enabled = false\n\n')
+              handle.write('[tools.update_plan]\n')
               handle.write('enabled = false\n\n')
               handle.write('[model_providers.agentinterposer]\n')
               handle.write('name = "AgentInterposer certification"\n')
