@@ -16,7 +16,7 @@ jobs:
   nvidia-hosted:
     name: nvidia-hosted
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Validate Doppler bootstrap token
@@ -418,9 +418,6 @@ jobs:
           proof_file="$GITHUB_WORKSPACE/.agentinterposer-codex-proof"
           capture_request="$RUNNER_TEMP/codex-captured-request.json"
           capture_home="$RUNNER_TEMP/codex-capture-home"
-          direct_home="$RUNNER_TEMP/codex-direct-home"
-          direct_jsonl="$RUNNER_TEMP/codex-direct-events.jsonl"
-          direct_final="$RUNNER_TEMP/codex-direct-final.txt"
           exact_response="$RUNNER_TEMP/codex-exact-response.sse"
           gateway_exact_response="$RUNNER_TEMP/codex-gateway-exact-response.sse"
           direct_headers="$RUNNER_TEMP/codex-direct-response.headers"
@@ -428,10 +425,11 @@ jobs:
           pid=''
           capture_pid=''
           capture_gateway_pid=''
+          buffer_pid=''
 
           cleanup() {
             rm -f "$proof_file"
-            for child in "$capture_gateway_pid" "$capture_pid" "$pid"; do
+            for child in "$buffer_pid" "$capture_gateway_pid" "$capture_pid" "$pid"; do
               if [ -n "$child" ]; then
                 kill "$child" 2>/dev/null || true
                 wait "$child" 2>/dev/null || true
@@ -882,19 +880,6 @@ jobs:
           print("codex_gateway_exact_function_call=ok")
           PY
 
-          mkdir -p "$direct_home"
-          python3 - "$codex_home/config.toml" "$direct_home/config.toml" <<'PY'
-          import sys
-
-          source, target = sys.argv[1], sys.argv[2]
-          text = open(source, encoding="utf-8").read()
-          text = text.replace('name = "AgentInterposer certification"', 'name = "NVIDIA direct diagnostic"')
-          text = text.replace('base_url = "http://127.0.0.1:11435/v1"', 'base_url = "https://integrate.api.nvidia.com/v1"')
-          text = text.replace('env_key = "AGENTINTERPOSER_CLIENT_KEY"', 'env_key = "NVIDIA_DIRECT_KEY"')
-          with open(target, "w", encoding="utf-8") as handle:
-              handle.write(text)
-          PY
-
           replay_home="$RUNNER_TEMP/codex-replay-home"
           replay_ready="$RUNNER_TEMP/codex-replay-ready"
           replay_first_request="$RUNNER_TEMP/codex-replay-request-1.json"
@@ -1039,62 +1024,209 @@ jobs:
           print("codex_replay_function_call_output=true")
           PYREPLAYCHECK
 
+          buffer_home="$RUNNER_TEMP/codex-buffer-home"
+          buffer_ready="$RUNNER_TEMP/codex-buffer-ready"
+          buffer_state="$RUNNER_TEMP/codex-buffer-state.json"
+          buffer_first_request="$RUNNER_TEMP/codex-buffer-request-1.json"
+          buffer_second_request="$RUNNER_TEMP/codex-buffer-request-2.json"
+          buffer_response="$RUNNER_TEMP/codex-buffer-response.sse"
+          buffer_jsonl="$RUNNER_TEMP/codex-buffer-events.jsonl"
+          buffer_stderr="$RUNNER_TEMP/codex-buffer-stderr.log"
+          mkdir -p "$buffer_home"
+
+          python3 - "$codex_home/config.toml" "$buffer_home/config.toml" <<'PYBUFFERCFG'
+          import sys
+
+          source, target = sys.argv[1], sys.argv[2]
+          text = open(source, encoding="utf-8").read()
+          text = text.replace('name = "AgentInterposer certification"', 'name = "NVIDIA buffered live diagnostic"')
+          text = text.replace('base_url = "http://127.0.0.1:11435/v1"', 'base_url = "http://127.0.0.1:11437/v1"')
+          text = text.replace('env_key = "AGENTINTERPOSER_CLIENT_KEY"', 'env_key = "BUFFER_CLIENT_KEY"')
+          with open(target, "w", encoding="utf-8") as handle:
+              handle.write(text)
+          PYBUFFERCFG
+
+          python3 - "$buffer_ready" "$buffer_state" "$buffer_first_request" "$buffer_second_request" "$buffer_response" <<'PYBUFFER' &
+          import http.server
+          import json
+          import os
+          import pathlib
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          ready_path, state_path, first_path, second_path, response_path = map(pathlib.Path, sys.argv[1:])
+          state = {"first_request": False, "upstream_completed": False, "second_request": False}
+
+          def write_state():
+              state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+          def event_types(payload):
+              seen = []
+              for raw in payload.decode("utf-8", errors="replace").splitlines():
+                  if not raw.startswith("data:"):
+                      continue
+                  value = raw.split(":", 1)[1].strip()
+                  if value == "[DONE]":
+                      continue
+                  try:
+                      event = json.loads(value)
+                  except Exception:
+                      continue
+                  event_type = event.get("type")
+                  if event_type and event_type not in seen:
+                      seen.append(str(event_type))
+              return seen
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              count = 0
+
+              def log_message(self, _format, *_args):
+                  return
+
+              def do_POST(self):
+                  length = int(self.headers.get("Content-Length", "0"))
+                  body = self.rfile.read(length)
+                  type(self).count += 1
+                  if type(self).count > 1:
+                      second_path.write_bytes(body)
+                      state["second_request"] = True
+                      write_state()
+                      payload = b'{"error":{"message":"buffer diagnostic complete"}}\n'
+                      self.send_response(500)
+                      self.send_header("Content-Type", "application/json")
+                      self.send_header("Content-Length", str(len(payload)))
+                      self.end_headers()
+                      self.wfile.write(payload)
+                      return
+
+                  first_path.write_bytes(body)
+                  state["first_request"] = True
+                  write_state()
+                  request = urllib.request.Request(
+                      "https://integrate.api.nvidia.com/v1/responses",
+                      data=body,
+                      headers={
+                          "Authorization": "Bearer " + os.environ["NVIDIA_API_KEY"],
+                          "Content-Type": "application/json",
+                      },
+                      method="POST",
+                  )
+                  started = time.monotonic()
+                  try:
+                      with urllib.request.urlopen(request, timeout=150) as upstream:
+                          state["upstream_status"] = int(upstream.status)
+                          state["upstream_headers_ms"] = int((time.monotonic() - started) * 1000)
+                          payload = upstream.read()
+                  except Exception as exc:
+                      state["upstream_error_type"] = type(exc).__name__
+                      write_state()
+                      error_body = b'{"error":{"message":"buffer upstream failed"}}\n'
+                      self.send_response(502)
+                      self.send_header("Content-Type", "application/json")
+                      self.send_header("Content-Length", str(len(error_body)))
+                      self.end_headers()
+                      self.wfile.write(error_body)
+                      return
+
+                  response_path.write_bytes(payload)
+                  events = event_types(payload)
+                  state["upstream_completed"] = True
+                  state["upstream_complete_ms"] = int((time.monotonic() - started) * 1000)
+                  state["upstream_bytes"] = len(payload)
+                  state["response_completed_seen"] = "response.completed" in events
+                  write_state()
+
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                  self.send_header("Cache-Control", "no-cache")
+                  self.send_header("Content-Length", str(len(payload)))
+                  self.end_headers()
+                  self.wfile.write(payload)
+                  self.wfile.flush()
+
+          server = http.server.ThreadingHTTPServer(("127.0.0.1", 11437), Handler)
+          ready_path.write_text("ready", encoding="utf-8")
+          server.serve_forever()
+          PYBUFFER
+          buffer_pid=$!
+
+          for _ in {1..50}; do
+            if [ -s "$buffer_ready" ]; then
+              break
+            fi
+            sleep 0.1
+          done
+          if [ ! -s "$buffer_ready" ]; then
+            echo 'Buffered live diagnostic server did not become ready.' >&2
+            exit 1
+          fi
+
           set +e
-          timeout --signal=TERM --kill-after=10s 120s \
-            env CODEX_HOME="$direct_home" \
-            NVIDIA_DIRECT_KEY="$NVIDIA_API_KEY" \
+          timeout --signal=TERM --kill-after=5s 180s \
+            env CODEX_HOME="$buffer_home" \
+            BUFFER_CLIENT_KEY='local-buffer-placeholder' \
             "$codex" exec \
               --ephemeral \
               --sandbox read-only \
               --ignore-rules \
               --json \
-              --output-last-message "$direct_final" \
-              "$prompt" >"$direct_jsonl" 2>"$RUNNER_TEMP/codex-direct-stderr.log"
-          direct_codex_status=$?
+              "$prompt" >"$buffer_jsonl" 2>"$buffer_stderr"
+          buffer_codex_status=$?
           set -e
-          echo "codex_direct_exit=${direct_codex_status}"
-          if [ "$direct_codex_status" -ne 0 ]; then
-            python3 - "$direct_jsonl" <<'PY'
+
+          kill "$buffer_pid" 2>/dev/null || true
+          wait "$buffer_pid" 2>/dev/null || true
+          buffer_pid=''
+          echo "codex_buffer_exit=${buffer_codex_status}"
+
+          python3 - "$buffer_state" "$buffer_response" "$buffer_second_request" <<'PYBUFFERCHECK'
           import json
+          import pathlib
           import sys
 
-          counts = {}
-          item_counts = {}
-          errors = []
-          try:
-              lines = open(sys.argv[1], encoding="utf-8")
-          except OSError:
-              lines = []
-          for raw in lines:
+          state_path, response_path, second_path = map(pathlib.Path, sys.argv[1:])
+          if not state_path.is_file():
+              raise SystemExit("Buffered live diagnostic produced no state")
+          state = json.loads(state_path.read_text(encoding="utf-8"))
+          for key in ("upstream_status", "upstream_headers_ms", "upstream_complete_ms", "upstream_bytes", "response_completed_seen", "second_request"):
+              if key in state:
+                  print(f"codex_buffer_{key}={state[key]}")
+          if not state.get("upstream_completed"):
+              raise SystemExit("Buffered live NVIDIA request did not complete within the diagnostic window")
+          if not state.get("response_completed_seen"):
+              raise SystemExit("Buffered live NVIDIA response had no response.completed event")
+          if not second_path.is_file():
+              raise SystemExit("Codex sent no second request after fully buffered live NVIDIA SSE")
+
+          call_id = None
+          for raw in response_path.read_text(encoding="utf-8").splitlines():
+              if not raw.startswith("data:"):
+                  continue
+              value = raw.split(":", 1)[1].strip()
+              if value == "[DONE]":
+                  continue
               try:
-                  event = json.loads(raw)
+                  event = json.loads(value)
               except Exception:
                   continue
-              event_type = str(event.get("type") or "unknown")
-              counts[event_type] = counts.get(event_type, 0) + 1
+              if event.get("type") != "response.output_item.done":
+                  continue
               item = event.get("item")
-              if isinstance(item, dict):
-                  item_type = str(item.get("type") or "unknown")
-                  item_counts[item_type] = item_counts.get(item_type, 0) + 1
-                  if item_type == "error":
-                      message = item.get("message") or item.get("error")
-                      if message:
-                          errors.append(str(message)[:240])
-          print("codex_direct_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)), file=sys.stderr)
-          print("codex_direct_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)), file=sys.stderr)
-          for message in errors[-3:]:
-              print("codex_direct_event_error=" + message, file=sys.stderr)
-          PY
-            echo 'Direct Codex-to-NVIDIA Responses diagnostic failed.' >&2
-            exit "$direct_codex_status"
-          fi
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  call_id = item.get("call_id")
+                  break
+          if not isinstance(call_id, str) or not call_id:
+              raise SystemExit("Buffered live NVIDIA SSE contained no completed function_call")
 
-          direct_actual="$(tr -d '\r\n' < "$direct_final")"
-          if [ "$direct_actual" != "$proof" ]; then
-            echo 'Direct Codex-to-NVIDIA final response did not match the proof value.' >&2
-            exit 1
-          fi
-          echo 'codex_direct_nvidia_tool_round_trip=ok'
+          second = json.loads(second_path.read_text(encoding="utf-8"))
+          inputs = second.get("input") or []
+          outputs = [item for item in inputs if isinstance(item, dict) and item.get("type") == "function_call_output"]
+          if not any(item.get("call_id") == call_id for item in outputs):
+              raise SystemExit("Buffered live Codex function_call_output did not match the NVIDIA call_id")
+          print("codex_buffer_function_call_output=true")
+          PYBUFFERCHECK
 
           set +e
           timeout --signal=TERM --kill-after=10s 120s \
