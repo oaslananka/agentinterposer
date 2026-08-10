@@ -885,6 +885,7 @@ jobs:
             HOME="$claude_home" \
             PATH='/usr/local/bin:/usr/bin:/bin' \
             CLAUDE_CODE_SHELL='/bin/bash' \
+            CLAUDE_BASH_NO_LOGIN='true' \
             AGENTINTERPOSER_TOOL_PROOF="$proof" \
             /bin/bash -lc 'test "$AGENTINTERPOSER_TOOL_PROOF" = "$1"' bash "$proof"; then
             echo 'Claude Code certification shell preflight failed.' >&2
