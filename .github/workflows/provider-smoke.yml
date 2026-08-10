@@ -881,6 +881,16 @@ jobs:
           PY
           chmod 0600 "$proof_expected"
           proof="$(cat "$proof_expected")"
+          if ! sudo -u "$claude_user" env -i \
+            HOME="$claude_home" \
+            PATH='/usr/local/bin:/usr/bin:/bin' \
+            CLAUDE_CODE_SHELL='/bin/bash' \
+            AGENTINTERPOSER_TOOL_PROOF="$proof" \
+            /bin/bash -lc 'test "$AGENTINTERPOSER_TOOL_PROOF" = "$1"' bash "$proof"; then
+            echo 'Claude Code certification shell preflight failed.' >&2
+            exit 1
+          fi
+          echo 'claude_code_shell_preflight=ok'
           echo 'claude_code_os_user_isolation=ok'
           echo 'claude_code_secret_environment_isolation=ok'
 
