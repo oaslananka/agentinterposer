@@ -420,7 +420,7 @@ jobs:
               handle.write('stream_max_retries = 0\n')
           PY
 
-          prompt="Use the shell tool to read the exact contents of $proof_file. Then reply with exactly the file contents and nothing else. Do not guess or infer the contents."
+          prompt="Run exactly one shell command: cat $proof_file . Do not run any other command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the contents."
           set +e
           timeout --signal=TERM --kill-after=10s 180s \
             env CODEX_HOME="$codex_home" \
@@ -444,6 +444,7 @@ jobs:
 
           counts = {}
           item_counts = {}
+          command_results = []
           try:
               lines = open(sys.argv[1], encoding="utf-8")
           except OSError:
@@ -459,8 +460,13 @@ jobs:
               if isinstance(item, dict):
                   item_type = str(item.get("type") or "unknown")
                   item_counts[item_type] = item_counts.get(item_type, 0) + 1
+                  if event_type == "item.completed" and item_type == "command_execution":
+                      output = item.get("aggregated_output")
+                      command_results.append((str(item.get("status") or "unknown"), item.get("exit_code"), len(output) if isinstance(output, str) else 0))
           print("codex_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)))
           print("codex_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)))
+          for index, (status, exit_code, output_bytes) in enumerate(command_results, start=1):
+              print(f"codex_command_result_{index}=status:{status},exit:{exit_code},output_bytes:{output_bytes}")
           PY
             echo 'Codex Responses tool round trip did not complete.' >&2
             exit "$codex_status"
