@@ -726,6 +726,7 @@ jobs:
           gateway_log="$RUNNER_TEMP/agentinterposer-claude-code.log"
           claude_output="$RUNNER_TEMP/claude-code-output.json"
           claude_stderr="$RUNNER_TEMP/claude-code-stderr.log"
+          claude_debug="$RUNNER_TEMP/claude-code-debug.log"
           proof_expected="$RUNNER_TEMP/claude-code-proof-expected"
           claude_capture_dir="$RUNNER_TEMP/claude-code-capture"
           claude_proxy="$RUNNER_TEMP/claude-code-capture-proxy.py"
@@ -741,7 +742,7 @@ jobs:
               wait "$proxy_pid" 2>/dev/null || true
             fi
             rm -rf "$claude_capture_dir"
-            rm -f "$claude_proxy" "$claude_output" "$claude_stderr" "$proof_expected"
+            rm -f "$claude_proxy" "$claude_output" "$claude_stderr" "$claude_debug" "$proof_expected"
             if [ -n "$pid" ]; then
               kill "$pid" 2>/dev/null || true
               wait "$pid" 2>/dev/null || true
@@ -924,12 +925,39 @@ jobs:
               --max-turns 3 \
               --output-format stream-json \
               --verbose \
+              --debug-file "$claude_debug" \
               >"$claude_output" 2>"$claude_stderr"
           )
           claude_exit=$?
           set -e
           echo "claude_code_exit=${claude_exit}"
           if [ "$claude_exit" -ne 0 ]; then
+            python3 - "$claude_debug" <<'PY'
+          import os
+          import sys
+
+          path = sys.argv[1]
+          text = open(path, encoding="utf-8", errors="replace").read().lower() if os.path.exists(path) else ""
+          classes = []
+          checks = [
+              ("enoent", "enoent"),
+              ("eacces", "eacces"),
+              ("permission denied", "permission"),
+              ("operation not permitted", "operation-not-permitted"),
+              ("bwrap", "bwrap"),
+              ("sandbox", "sandbox"),
+              ("shell snapshot", "shell-snapshot"),
+              ("login shell", "login-shell"),
+              ("working directory", "working-directory"),
+              ("spawn", "spawn"),
+              ("exit code 1", "exit-code-1"),
+          ]
+          for needle, label in checks:
+              if needle in text and label not in classes:
+                  classes.append(label)
+          print("claude_code_debug_bytes=" + str(len(text.encode("utf-8"))))
+          print("claude_code_debug_classes=" + ("+".join(classes) if classes else "other"))
+          PY
             python3 - "$claude_capture_dir" <<'PY'
           import glob
           import json
