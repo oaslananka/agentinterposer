@@ -67,6 +67,7 @@ jobs:
           trap 'rm -f "$body"' EXIT
 
           status="$(curl --silent --show-error \
+            --max-time 120 \
             --output "$body" \
             --write-out '%{http_code}' \
             --request POST \
@@ -113,6 +114,7 @@ jobs:
           trap 'rm -f "$body"' EXIT
 
           status="$(curl --silent --show-error \
+            --max-time 120 \
             --output "$body" \
             --write-out '%{http_code}' \
             --request POST \
@@ -160,6 +162,7 @@ jobs:
           trap 'rm -f "$body"' EXIT
 
           status="$(curl --silent --show-error \
+            --max-time 120 \
             --output "$body" \
             --write-out '%{http_code}' \
             --request POST \
@@ -195,69 +198,6 @@ jobs:
           PY
             echo "messages_supported=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Probe AgentInterposer Responses passthrough
-        shell: bash
-        env:
-          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
-          MODEL: ${{ inputs.model }}
-        run: |
-          set -euo pipefail
-          binary="$RUNNER_TEMP/agentinterposer"
-          log="$RUNNER_TEMP/agentinterposer.log"
-          body="$(mktemp)"
-          pid=''
-
-          cleanup() {
-            rm -f "$body"
-            if [ -n "$pid" ]; then
-              kill "$pid" 2>/dev/null || true
-              wait "$pid" 2>/dev/null || true
-            fi
-          }
-          trap cleanup EXIT
-
-          go build -trimpath -o "$binary" ./cmd/agentinterposer
-          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
-            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
-            "$binary" >"$log" 2>&1 &
-          pid=$!
-
-          ready=false
-          for _ in {1..30}; do
-            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
-              ready=true
-              break
-            fi
-            sleep 0.2
-          done
-          if [ "$ready" != true ]; then
-            echo 'AgentInterposer did not become ready.' >&2
-            tail -n 40 "$log" >&2 || true
-            exit 1
-          fi
-
-          status="$(curl --silent --show-error \
-            --output "$body" \
-            --write-out '%{http_code}' \
-            --request POST \
-            'http://127.0.0.1:11435/v1/responses' \
-            --header 'Content-Type: application/json' \
-            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "input": "Reply only with OK", "max_output_tokens": 16, "stream": False}))')")"
-
-          echo "agentinterposer_responses_http=${status}"
-          if [[ ! "$status" =~ ^2 ]]; then
-            echo 'AgentInterposer Responses passthrough failed.' >&2
-            exit 1
-          fi
-
-          python3 - "$body" <<'PY'
-          import json, sys
-          data = json.load(open(sys.argv[1], encoding="utf-8"))
-          if data.get("object") != "response" and not isinstance(data.get("output"), list):
-              raise SystemExit("AgentInterposer returned an unexpected Responses schema")
-          print("agentinterposer_responses_schema=ok")
-          PY
 
       - name: Probe Responses function call
         id: responses_tool
@@ -320,6 +260,70 @@ jobs:
           print("responses_function_call=ok")
           PY
           echo 'responses_tool_verified=true' >> "$GITHUB_OUTPUT"
+
+      - name: Probe AgentInterposer Responses passthrough
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/agentinterposer"
+          log="$RUNNER_TEMP/agentinterposer.log"
+          body="$(mktemp)"
+          pid=''
+
+          cleanup() {
+            rm -f "$body"
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$log" 2>&1 &
+          pid=$!
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready.' >&2
+            tail -n 40 "$log" >&2 || true
+            exit 1
+          fi
+
+          status="$(curl --silent --show-error \
+            --max-time 120 \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/responses' \
+            --header 'Content-Type: application/json' \
+            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "input": "Reply only with OK", "max_output_tokens": 16, "stream": False}))')")"
+
+          echo "agentinterposer_responses_http=${status}"
+          if [[ ! "$status" =~ ^2 ]]; then
+            echo 'AgentInterposer Responses passthrough failed.' >&2
+            exit 1
+          fi
+
+          python3 - "$body" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          if data.get("object") != "response" and not isinstance(data.get("output"), list):
+              raise SystemExit("AgentInterposer returned an unexpected Responses schema")
+          print("agentinterposer_responses_schema=ok")
+          PY
 
       - name: Probe Codex Responses tool round trip
         id: codex
