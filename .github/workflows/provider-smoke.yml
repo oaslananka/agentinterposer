@@ -713,13 +713,21 @@ jobs:
           gateway_log="$RUNNER_TEMP/agentinterposer-claude-code.log"
           claude_output="$RUNNER_TEMP/claude-code-output.json"
           claude_stderr="$RUNNER_TEMP/claude-code-stderr.log"
+          claude_capture_dir="$RUNNER_TEMP/claude-code-capture"
+          claude_proxy="$RUNNER_TEMP/claude-code-capture-proxy.py"
+          proxy_pid=''
           claude_user='agentinterposer-claude'
           claude_home='/tmp/agentinterposer-claude-home'
           claude_settings='/tmp/agentinterposer-claude-home/settings.json'
           pid=''
 
           cleanup() {
-            rm -f "$claude_output" "$claude_stderr"
+            if [ -n "$proxy_pid" ]; then
+              kill "$proxy_pid" 2>/dev/null || true
+              wait "$proxy_pid" 2>/dev/null || true
+            fi
+            rm -rf "$claude_capture_dir"
+            rm -f "$claude_proxy" "$claude_output" "$claude_stderr"
             if [ -n "$pid" ]; then
               kill "$pid" 2>/dev/null || true
               wait "$pid" 2>/dev/null || true
@@ -747,6 +755,85 @@ jobs:
           done
           if [ "$ready" != true ]; then
             echo 'AgentInterposer did not become ready for the Claude Code probe.' >&2
+            exit 1
+          fi
+
+          rm -rf "$claude_capture_dir"
+          mkdir -p "$claude_capture_dir"
+          cat > "$claude_proxy" <<'PY'
+          import http.client
+          import os
+          import threading
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          capture_dir = os.environ["CLAUDE_CAPTURE_DIR"]
+          lock = threading.Lock()
+          request_count = 0
+
+          class Handler(BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.0"
+
+              def do_POST(self):
+                  global request_count
+                  length = int(self.headers.get("Content-Length", "0"))
+                  body = self.rfile.read(length)
+                  with lock:
+                      request_count += 1
+                      index = request_count
+                  request_path = os.path.join(capture_dir, f"request_{index}.json")
+                  status_path = os.path.join(capture_dir, f"response_{index}.status")
+                  with open(request_path, "wb") as handle:
+                      handle.write(body)
+
+                  headers = {}
+                  for name in ("Content-Type", "anthropic-version", "anthropic-beta", "Authorization"):
+                      value = self.headers.get(name)
+                      if value:
+                          headers[name] = value
+                  connection = http.client.HTTPConnection("127.0.0.1", 11435, timeout=180)
+                  try:
+                      connection.request("POST", self.path, body=body, headers=headers)
+                      response = connection.getresponse()
+                      with open(status_path, "w", encoding="utf-8") as handle:
+                          handle.write(str(response.status))
+                      self.send_response(response.status)
+                      for name in ("Content-Type", "Cache-Control", "Retry-After"):
+                          value = response.getheader(name)
+                          if value:
+                              self.send_header(name, value)
+                      self.send_header("Connection", "close")
+                      self.end_headers()
+                      while True:
+                          chunk = response.read(4096)
+                          if not chunk:
+                              break
+                          self.wfile.write(chunk)
+                          self.wfile.flush()
+                  finally:
+                      connection.close()
+
+              def log_message(self, *_):
+                  pass
+
+          ThreadingHTTPServer(("127.0.0.1", 11434), Handler).serve_forever()
+          PY
+          CLAUDE_CAPTURE_DIR="$claude_capture_dir" python3 "$claude_proxy" &
+          proxy_pid=$!
+          proxy_ready=false
+          for _ in {1..30}; do
+            if python3 - <<'PY' >/dev/null 2>&1
+          import socket
+          sock = socket.create_connection(("127.0.0.1", 11434), 0.2)
+          sock.close()
+          PY
+            then
+              proxy_ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$proxy_ready" != true ]; then
+            echo 'Claude Code capture proxy did not become ready.' >&2
             exit 1
           fi
 
@@ -787,7 +874,7 @@ jobs:
             HOME="$claude_home" \
             PATH="/usr/local/bin:/usr/bin:/bin" \
             CLAUDE_CONFIG_DIR="$claude_home/.claude" \
-            ANTHROPIC_BASE_URL='http://127.0.0.1:11435' \
+            ANTHROPIC_BASE_URL='http://127.0.0.1:11434' \
             ANTHROPIC_AUTH_TOKEN='agentinterposer-local-placeholder' \
             ANTHROPIC_MODEL="$MODEL" \
             CLAUDE_CODE_DISABLE_THINKING='1' \
@@ -812,6 +899,69 @@ jobs:
           set -e
           echo "claude_code_exit=${claude_exit}"
           if [ "$claude_exit" -ne 0 ]; then
+            python3 - "$claude_capture_dir" <<'PY'
+          import glob
+          import json
+          import os
+          import sys
+
+          capture_dir = sys.argv[1]
+          requests = sorted(glob.glob(os.path.join(capture_dir, "request_*.json")))
+          print("claude_code_captured_request_count=" + str(len(requests)))
+          for position, path in enumerate(requests, 1):
+              try:
+                  data = json.load(open(path, encoding="utf-8"))
+              except Exception:
+                  print(f"claude_code_request_{position}_json=invalid")
+                  continue
+              print(f"claude_code_request_{position}_keys=" + ",".join(sorted(data)))
+              status_path = os.path.join(capture_dir, f"response_{position}.status")
+              status = open(status_path, encoding="utf-8").read().strip() if os.path.exists(status_path) else "missing"
+              print(f"claude_code_request_{position}_response_status={status}")
+              messages = data.get("messages")
+              if not isinstance(messages, list):
+                  messages = []
+              print(f"claude_code_request_{position}_message_roles=" + ",".join(str(m.get("role", "unknown")) for m in messages if isinstance(m, dict)))
+              block_types = []
+              tool_result_shapes = []
+              tool_use_shapes = []
+              for message in messages:
+                  if not isinstance(message, dict):
+                      continue
+                  content = message.get("content")
+                  if not isinstance(content, list):
+                      continue
+                  for block in content:
+                      if not isinstance(block, dict):
+                          continue
+                      block_type = str(block.get("type", "unknown"))
+                      block_types.append(block_type)
+                      if block_type == "tool_result":
+                          nested = block.get("content")
+                          nested_types = []
+                          if isinstance(nested, list):
+                              nested_types = [str(item.get("type", "unknown")) for item in nested if isinstance(item, dict)]
+                          tool_result_shapes.append(
+                              "keys=" + "+".join(sorted(block))
+                              + ";is_error=" + str(bool(block.get("is_error"))).lower()
+                              + ";content_kind=" + type(nested).__name__
+                              + ";nested_types=" + ("+".join(nested_types) if nested_types else "none")
+                          )
+                      elif block_type == "tool_use":
+                          tool_input = block.get("input")
+                          tool_use_shapes.append(
+                              "keys=" + "+".join(sorted(block))
+                              + ";name=" + str(block.get("name", "unknown"))
+                              + ";input_keys=" + ("+".join(sorted(tool_input)) if isinstance(tool_input, dict) else "none")
+                          )
+              print(f"claude_code_request_{position}_content_block_types=" + (",".join(block_types) if block_types else "none"))
+              print(f"claude_code_request_{position}_tool_result_shapes=" + ("|".join(tool_result_shapes) if tool_result_shapes else "none"))
+              print(f"claude_code_request_{position}_tool_use_shapes=" + ("|".join(tool_use_shapes) if tool_use_shapes else "none"))
+              tools = data.get("tools")
+              if not isinstance(tools, list):
+                  tools = []
+              print(f"claude_code_request_{position}_tool_names=" + ",".join(str(tool.get("name", "unknown")) for tool in tools if isinstance(tool, dict)))
+          PY
             python3 - "$claude_output" "$claude_stderr" <<'PY'
           import json
           import os
