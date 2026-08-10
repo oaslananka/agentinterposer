@@ -37,13 +37,7 @@ func TestHandlerTranslatesAnthropicTextMessageToChatCompletions(t *testing.T) {
 	}
 
 	const body = `{"model":"nvidia/test","max_tokens":128,"system":"You are concise.","messages":[{"role":"user","content":"Say hello"}],"temperature":0.2,"top_p":0.9}`
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer client-token")
-	request.Header.Set("anthropic-version", "2023-06-01")
-	response := httptest.NewRecorder()
-
-	handler.ServeHTTP(response, request)
+	response := serveMessages(handler, body)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
@@ -143,9 +137,7 @@ func TestHandlerTranslatesAnthropicToolUseAndToolResultRoundTrip(t *testing.T) {
 	}
 
 	const firstBody = `{"model":"nvidia/test","max_tokens":128,"messages":[{"role":"user","content":"What is the weather in Ankara?"}],"tools":[{"name":"get_weather","description":"Get weather","input_schema":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}],"tool_choice":{"type":"any","disable_parallel_tool_use":true}}`
-	first := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(firstBody))
-	firstResponse := httptest.NewRecorder()
-	handler.ServeHTTP(firstResponse, first)
+	firstResponse := serveMessages(handler, firstBody)
 	if firstResponse.Code != http.StatusOK {
 		t.Fatalf("first status = %d, body=%s", firstResponse.Code, firstResponse.Body.String())
 	}
@@ -186,9 +178,7 @@ func TestHandlerTranslatesAnthropicToolUseAndToolResultRoundTrip(t *testing.T) {
 	}
 
 	const secondBody = `{"model":"nvidia/test","max_tokens":128,"tools":[{"name":"get_weather","description":"Get weather","input_schema":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}],"messages":[{"role":"user","content":"What is the weather in Ankara?"},{"role":"assistant","content":[{"type":"tool_use","id":"call_weather","name":"get_weather","input":{"location":"Ankara"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_weather","content":"sunny"}]}]}`
-	second := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(secondBody))
-	secondResponse := httptest.NewRecorder()
-	handler.ServeHTTP(secondResponse, second)
+	secondResponse := serveMessages(handler, secondBody)
 	if secondResponse.Code != http.StatusOK {
 		t.Fatalf("second status = %d, body=%s", secondResponse.Code, secondResponse.Body.String())
 	}
@@ -236,9 +226,7 @@ func TestHandlerRejectsStreamingAnthropicMessagesBeforeUpstream(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
@@ -281,9 +269,7 @@ func TestHandlerRejectsUnsupportedAnthropicContentBlockBeforeUpstream(t *testing
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`)
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
@@ -319,9 +305,7 @@ func TestHandlerTranslatesAnthropicNamedToolChoice(t *testing.T) {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"lookup"}],"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}],"tool_choice":{"type":"tool","name":"lookup","disable_parallel_tool_use":true}}`))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"lookup"}],"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}],"tool_choice":{"type":"tool","name":"lookup","disable_parallel_tool_use":true}}`)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
@@ -361,9 +345,7 @@ func TestHandlerTranslatesUpstreamRateLimitToAnthropicError(t *testing.T) {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
 
 	if response.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusTooManyRequests, response.Body.String())
@@ -412,9 +394,7 @@ func TestHandlerRejectsAnthropicStopSequencesBeforeUpstream(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`)
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
@@ -425,4 +405,14 @@ func TestHandlerRejectsAnthropicStopSequencesBeforeUpstream(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "stop_sequences") {
 		t.Fatalf("body = %s, want stop_sequences error", response.Body.String())
 	}
+}
+
+func serveMessages(handler http.Handler, body string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer client-token")
+	request.Header.Set("anthropic-version", "2023-06-01")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }
