@@ -61,7 +61,6 @@ type chatCompletionRequest struct {
 	Stream            bool          `json:"stream"`
 	Temperature       *float64      `json:"temperature,omitempty"`
 	TopP              *float64      `json:"top_p,omitempty"`
-	Stop              []string      `json:"stop,omitempty"`
 	Tools             []chatTool    `json:"tools,omitempty"`
 	ToolChoice        any           `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
@@ -204,6 +203,9 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	if request.MaxTokens < 0 {
 		return chatCompletionRequest{}, errors.New("max_tokens must be non-negative")
 	}
+	if len(request.StopSequences) > 0 {
+		return chatCompletionRequest{}, errors.New("stop_sequences are not supported by the Messages adapter yet")
+	}
 
 	translated := chatCompletionRequest{
 		Model:       request.Model,
@@ -211,7 +213,6 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 		Stream:      false,
 		Temperature: request.Temperature,
 		TopP:        request.TopP,
-		Stop:        request.StopSequences,
 	}
 
 	system, err := decodeTextContent(request.System, "system")

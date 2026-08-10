@@ -130,7 +130,7 @@ curl http://127.0.0.1:11435/v1/messages \
   }'
 ```
 
-This adapter currently covers non-streaming text, custom client `tools`, `tool_choice`, `tool_use`, and successful `tool_result` blocks. `stream: true`, image/thinking blocks, server tools, and `tool_result` blocks with `is_error: true` are rejected rather than silently translated. The manual Provider Smoke `scope=messages` verifies a real NVIDIA-hosted text request and tool-result round trip.
+This adapter currently covers non-streaming text, custom client `tools`, `tool_choice`, `tool_use`, and successful `tool_result` blocks. `stream: true`, `stop_sequences`, image/thinking blocks, server tools, and `tool_result` blocks with `is_error: true` are rejected rather than silently translated. The manual Provider Smoke `scope=messages` verifies a real NVIDIA-hosted text request and tool-result round trip.
 
 ## Configuration
 

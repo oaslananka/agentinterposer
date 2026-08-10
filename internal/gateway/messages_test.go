@@ -36,7 +36,7 @@ func TestHandlerTranslatesAnthropicTextMessageToChatCompletions(t *testing.T) {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
 
-	const body = `{"model":"nvidia/test","max_tokens":128,"system":"You are concise.","messages":[{"role":"user","content":"Say hello"}],"temperature":0.2,"top_p":0.9,"stop_sequences":["STOP"]}`
+	const body = `{"model":"nvidia/test","max_tokens":128,"system":"You are concise.","messages":[{"role":"user","content":"Say hello"}],"temperature":0.2,"top_p":0.9}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer client-token")
@@ -69,10 +69,6 @@ func TestHandlerTranslatesAnthropicTextMessageToChatCompletions(t *testing.T) {
 	}
 	if gotRequest["temperature"] != 0.2 || gotRequest["top_p"] != 0.9 {
 		t.Fatalf("upstream sampling params = temperature:%#v top_p:%#v", gotRequest["temperature"], gotRequest["top_p"])
-	}
-	stop, ok := gotRequest["stop"].([]any)
-	if !ok || len(stop) != 1 || stop[0] != "STOP" {
-		t.Fatalf("upstream stop = %#v, want [STOP]", gotRequest["stop"])
 	}
 	if gotRequest["stream"] != false {
 		t.Fatalf("upstream stream = %#v, want false", gotRequest["stream"])
@@ -405,4 +401,28 @@ func newMessagesTestHandler(t *testing.T, upstreamHandler http.Handler) http.Han
 		t.Fatalf("NewHandler() error = %v", err)
 	}
 	return handler
+}
+
+func TestHandlerRejectsAnthropicStopSequencesBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+	if !strings.Contains(response.Body.String(), "stop_sequences") {
+		t.Fatalf("body = %s, want stop_sequences error", response.Body.String())
+	}
 }
