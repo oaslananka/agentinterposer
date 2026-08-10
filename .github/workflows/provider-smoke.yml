@@ -437,6 +437,9 @@ jobs:
           gateway_exact_response="$RUNNER_TEMP/codex-gateway-exact-response.sse"
           direct_headers="$RUNNER_TEMP/codex-direct-response.headers"
           gateway_headers="$RUNNER_TEMP/codex-gateway-response.headers"
+          live_request_capture="$RUNNER_TEMP/codex-live-request.json"
+          live_response_capture="$RUNNER_TEMP/codex-live-response.sse"
+          diag_dir="$GITHUB_WORKSPACE/cmd/agentinterposerdiag"
           pid=''
           capture_pid=''
           capture_gateway_pid=''
@@ -446,6 +449,7 @@ jobs:
 
           cleanup() {
             rm -f "$proof_file"
+            rm -rf "$diag_dir"
             for child in "$gateway_replay_pid" "$gateway_replay_upstream_pid" "$buffer_pid" "$capture_gateway_pid" "$capture_pid" "$pid"; do
               if [ -n "$child" ]; then
                 kill "$child" 2>/dev/null || true
@@ -464,8 +468,108 @@ jobs:
             exit 1
           fi
 
-          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          if [ "$SCOPE" = 'codex' ]; then
+            mkdir -p "$diag_dir"
+            cat > "$diag_dir/main.go" <<'GODIAG'
+          package main
+
+          import (
+              "bytes"
+              "context"
+              "io"
+              "net/http"
+              "os"
+              "os/signal"
+              "sync"
+              "syscall"
+              "time"
+
+              "github.com/oaslananka/agentinterposer/internal/config"
+              "github.com/oaslananka/agentinterposer/internal/gateway"
+          )
+
+          type captureWriter struct {
+              http.ResponseWriter
+              file *os.File
+          }
+
+          func (w *captureWriter) Write(p []byte) (int, error) {
+              if w.file != nil {
+                  _, _ = w.file.Write(p)
+                  _ = w.file.Sync()
+              }
+              return w.ResponseWriter.Write(p)
+          }
+
+          func (w *captureWriter) Flush() {
+              if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+                  flusher.Flush()
+              }
+          }
+
+          func (w *captureWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+          func main() {
+              cfg, err := config.LoadFromEnv()
+              if err != nil { panic(err) }
+              base, err := gateway.NewHandler(gateway.Config{
+                  UpstreamURL: cfg.UpstreamURL,
+                  UpstreamBearerToken: cfg.UpstreamBearerToken,
+                  MaxConcurrent: cfg.MaxConcurrent,
+                  MaxRetries: cfg.MaxRetries,
+                  RetryBaseDelay: cfg.RetryBaseDelay,
+                  MaxRequestBytes: cfg.MaxRequestBytes,
+              })
+              if err != nil { panic(err) }
+
+              requestPath := os.Getenv("AGENTINTERPOSER_DIAG_REQUEST")
+              responsePath := os.Getenv("AGENTINTERPOSER_DIAG_RESPONSE")
+              var requestOnce sync.Once
+              var responseOnce sync.Once
+
+              wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                  if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
+                      base.ServeHTTP(w, r)
+                      return
+                  }
+
+                  body, readErr := io.ReadAll(r.Body)
+                  if readErr == nil {
+                      r.Body = io.NopCloser(bytes.NewReader(body))
+                      requestOnce.Do(func() { _ = os.WriteFile(requestPath, body, 0o600) })
+                  }
+
+                  var capture *os.File
+                  responseOnce.Do(func() {
+                      capture, _ = os.OpenFile(responsePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+                  })
+                  if capture == nil {
+                      base.ServeHTTP(w, r)
+                      return
+                  }
+                  defer capture.Close()
+                  base.ServeHTTP(&captureWriter{ResponseWriter: w, file: capture}, r)
+              })
+
+              server := &http.Server{Addr: cfg.ListenAddr, Handler: wrapped, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+              ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+              defer stop()
+              go func() {
+                  <-ctx.Done()
+                  shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+                  defer cancel()
+                  _ = server.Shutdown(shutdownCtx)
+              }()
+              if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed { panic(err) }
+          }
+          GODIAG
+            go build -trimpath -o "$binary" ./cmd/agentinterposerdiag
+          else
+            go build -trimpath -o "$binary" ./cmd/agentinterposer
+          fi
           AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            AGENTINTERPOSER_DIAG_REQUEST="$live_request_capture" \
+            AGENTINTERPOSER_DIAG_RESPONSE="$live_response_capture" \
             NVIDIA_API_KEY="$NVIDIA_API_KEY" \
             "$binary" >"$gateway_log" 2>&1 &
           pid=$!
@@ -602,6 +706,95 @@ jobs:
           print("codex_fresh_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)))
           PYFRESH
               tail -n 20 "$fresh_stderr" >&2 || true
+
+              python3 - "$live_request_capture" "$live_response_capture" <<'PYLIVE'
+          import json
+          import os
+          import sys
+
+          request_path, response_path = sys.argv[1:]
+          print("codex_live_request_captured=" + str(os.path.isfile(request_path)).lower())
+          if os.path.isfile(request_path):
+              print("codex_live_request_bytes=" + str(os.path.getsize(request_path)))
+          print("codex_live_response_captured=" + str(os.path.isfile(response_path)).lower())
+          if not os.path.isfile(response_path):
+              raise SystemExit(0)
+          print("codex_live_response_bytes=" + str(os.path.getsize(response_path)))
+          events = []
+          function_call = False
+          completed = False
+          for raw in open(response_path, encoding="utf-8", errors="replace"):
+              line = raw.strip()
+              if not line.startswith("data:"):
+                  continue
+              payload = line.split(":", 1)[1].strip()
+              if payload == "[DONE]":
+                  continue
+              try:
+                  event = json.loads(payload)
+              except Exception:
+                  continue
+              event_type = event.get("type")
+              if event_type and event_type not in events:
+                  events.append(str(event_type))
+              item = event.get("item")
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  function_call = True
+              if event_type == "response.completed":
+                  completed = True
+          print("codex_live_response_events=" + ",".join(events))
+          print("codex_live_response_function_call=" + str(function_call).lower())
+          print("codex_live_response_completed=" + str(completed).lower())
+          PYLIVE
+
+              if [ -s "$live_request_capture" ]; then
+                live_replay="$RUNNER_TEMP/codex-live-request-replay.sse"
+                set +e
+                live_replay_http="$(curl --silent --show-error --no-buffer \
+                  --max-time 90 \
+                  --output "$live_replay" \
+                  --write-out '%{http_code}' \
+                  --request POST \
+                  'https://integrate.api.nvidia.com/v1/responses' \
+                  --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+                  --header 'Content-Type: application/json' \
+                  --data-binary "@$live_request_capture")"
+                live_replay_status=$?
+                set -e
+                echo "codex_live_replay_curl_exit=${live_replay_status}"
+                echo "codex_live_replay_http=${live_replay_http}"
+                if [ "$live_replay_status" -eq 0 ] && [[ "$live_replay_http" =~ ^2 ]]; then
+                  python3 - "$live_replay" <<'PYLIVEREPLAY'
+          import json
+          import sys
+          events = []
+          completed = False
+          function_call = False
+          for raw in open(sys.argv[1], encoding="utf-8", errors="replace"):
+              line = raw.strip()
+              if not line.startswith("data:"):
+                  continue
+              value = line.split(":", 1)[1].strip()
+              if value == "[DONE]":
+                  continue
+              try:
+                  event = json.loads(value)
+              except Exception:
+                  continue
+              event_type = event.get("type")
+              if event_type and event_type not in events:
+                  events.append(str(event_type))
+              item = event.get("item")
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  function_call = True
+              if event_type == "response.completed":
+                  completed = True
+          print("codex_live_replay_events=" + ",".join(events))
+          print("codex_live_replay_function_call=" + str(function_call).lower())
+          print("codex_live_replay_completed=" + str(completed).lower())
+          PYLIVEREPLAY
+                fi
+              fi
               exit "$fresh_status"
             fi
             fresh_actual="$(tr -d '\r\n' < "$fresh_final")"
