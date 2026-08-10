@@ -1065,14 +1065,34 @@ jobs:
 
           expected = "echo $AGENTINTERPOSER_TOOL_PROOF"
           bash_commands = []
+          bash_tool_ids = []
+          bash_input_shapes = []
           for event in events:
               for obj in walk(event):
                   if obj.get("type") != "tool_use" or obj.get("name") != "Bash":
                       continue
                   tool_input = obj.get("input")
+                  tool_id = obj.get("id")
+                  if isinstance(tool_id, str):
+                      bash_tool_ids.append(tool_id)
+                  if isinstance(tool_input, dict):
+                      description = tool_input.get("description")
+                      bash_input_shapes.append(
+                          "keys=" + "+".join(sorted(tool_input))
+                          + ";description_kind=" + type(description).__name__
+                          + ";description_bytes=" + str(len(description.encode("utf-8")) if isinstance(description, str) else 0)
+                      )
                   if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
                       bash_commands.append(tool_input["command"])
           print("claude_code_bash_tool_use_count=" + str(len(bash_commands)))
+          if bash_tool_ids:
+              tool_id = bash_tool_ids[0]
+              prefix = tool_id.split("_", 1)[0] if "_" in tool_id else tool_id[:12]
+              if not re.fullmatch(r"[A-Za-z0-9-]{1,24}", prefix):
+                  prefix = "other"
+              print("claude_code_bash_tool_id_prefix=" + prefix)
+              print("claude_code_bash_tool_id_length=" + str(len(tool_id)))
+          print("claude_code_bash_input_shapes=" + ("|".join(bash_input_shapes) if bash_input_shapes else "none"))
           if bash_commands:
               command = bash_commands[0]
               trimmed = command.strip()
