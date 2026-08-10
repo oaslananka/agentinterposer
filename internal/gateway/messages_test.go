@@ -217,7 +217,7 @@ func TestHandlerTranslatesAnthropicToolUseAndToolResultRoundTrip(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsStreamingAnthropicMessagesBeforeUpstream(t *testing.T) {
+func TestHandlerRejectsStreamingAnthropicThinkingBeforeUpstream(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
@@ -226,7 +226,7 @@ func TestHandlerRejectsStreamingAnthropicMessagesBeforeUpstream(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"stream":true,"thinking":{"type":"enabled","budget_tokens":16},"messages":[{"role":"user","content":"hi"}]}`)
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
@@ -234,18 +234,8 @@ func TestHandlerRejectsStreamingAnthropicMessagesBeforeUpstream(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatalf("upstream calls = %d, want 0", calls.Load())
 	}
-	var body struct {
-		Type  string `json:"type"`
-		Error struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode error response: %v", err)
-	}
-	if body.Type != "error" || body.Error.Type != "invalid_request_error" || !strings.Contains(body.Error.Message, "stream") {
-		t.Fatalf("error response = %#v", body)
+	if !strings.Contains(response.Body.String(), "thinking") {
+		t.Fatalf("body = %s, want thinking error", response.Body.String())
 	}
 }
 
