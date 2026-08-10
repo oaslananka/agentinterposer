@@ -321,10 +321,6 @@ jobs:
               if event_type and event_type not in event_types:
                   event_types.append(str(event_type))
               item = data.get("item")
-              if event_type == "response.output_item.added":
-                  output_item_added_shape = item_shape(item)
-              if event_type == "response.output_item.done":
-                  output_item_done_shape = item_shape(item)
               if isinstance(item, dict) and item.get("type") == "function_call":
                   function_call_seen = True
               if event_type == "response.completed":
@@ -835,6 +831,10 @@ jobs:
               if event_type:
                   events.append(str(event_type))
               item = data.get("item")
+              if event_type == "response.output_item.added":
+                  output_item_added_shape = item_shape(item)
+              if event_type == "response.output_item.done":
+                  output_item_done_shape = item_shape(item)
               if isinstance(item, dict) and item.get("type") == "function_call":
                   function_name = item.get("name") or function_name
                   call_id_present = bool(item.get("call_id")) or call_id_present
