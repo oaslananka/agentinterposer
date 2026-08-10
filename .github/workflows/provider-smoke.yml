@@ -797,7 +797,7 @@ jobs:
               --bare \
               --no-session-persistence \
               --tools 'Bash' \
-              --permission-mode dontAsk \
+              --permission-mode default \
               --settings "$claude_settings" \
               --max-turns 3 \
               --output-format stream-json \
