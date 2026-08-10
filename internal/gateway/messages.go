@@ -55,15 +55,20 @@ type anthropicToolChoice struct {
 }
 
 type chatCompletionRequest struct {
-	Model             string        `json:"model"`
-	Messages          []chatMessage `json:"messages"`
-	MaxTokens         int           `json:"max_tokens"`
-	Stream            bool          `json:"stream"`
-	Temperature       *float64      `json:"temperature,omitempty"`
-	TopP              *float64      `json:"top_p,omitempty"`
-	Tools             []chatTool    `json:"tools,omitempty"`
-	ToolChoice        any           `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
+	Model             string             `json:"model"`
+	Messages          []chatMessage      `json:"messages"`
+	MaxTokens         int                `json:"max_tokens"`
+	Stream            bool               `json:"stream"`
+	StreamOptions     *chatStreamOptions `json:"stream_options,omitempty"`
+	Temperature       *float64           `json:"temperature,omitempty"`
+	TopP              *float64           `json:"top_p,omitempty"`
+	Tools             []chatTool         `json:"tools,omitempty"`
+	ToolChoice        any                `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool              `json:"parallel_tool_calls,omitempty"`
+}
+
+type chatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatMessage struct {
@@ -137,10 +142,6 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON request body")
 		return
 	}
-	if request.Stream {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "stream=true is not supported by the Messages adapter yet")
-		return
-	}
 	if len(bytes.TrimSpace(request.Thinking)) > 0 && string(bytes.TrimSpace(request.Thinking)) != "null" {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "thinking is not supported by the Messages adapter yet")
 		return
@@ -172,6 +173,15 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstreamResponse.Body.Close()
 	copyHeader(w.Header(), upstreamResponse.Header, "Retry-After")
+
+	if request.Stream && upstreamResponse.StatusCode >= 200 && upstreamResponse.StatusCode < 300 {
+		if !strings.HasPrefix(strings.ToLower(upstreamResponse.Header.Get("Content-Type")), "text/event-stream") {
+			writeAnthropicError(w, http.StatusBadGateway, "api_error", "streaming upstream returned a non-SSE response")
+			return
+		}
+		streamAnthropicMessages(w, upstreamResponse.Body, request.Model)
+		return
+	}
 
 	upstreamBody, err := io.ReadAll(upstreamResponse.Body)
 	if err != nil {
@@ -210,9 +220,12 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	translated := chatCompletionRequest{
 		Model:       request.Model,
 		MaxTokens:   request.MaxTokens,
-		Stream:      false,
+		Stream:      request.Stream,
 		Temperature: request.Temperature,
 		TopP:        request.TopP,
+	}
+	if request.Stream {
+		translated.StreamOptions = &chatStreamOptions{IncludeUsage: true}
 	}
 
 	system, err := decodeTextContent(request.System, "system")
