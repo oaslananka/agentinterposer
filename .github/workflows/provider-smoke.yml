@@ -413,6 +413,7 @@ jobs:
           codex_jsonl="$RUNNER_TEMP/codex-events.jsonl"
           codex_stderr="$RUNNER_TEMP/codex-stderr.log"
           final_message="$RUNNER_TEMP/codex-final.txt"
+          model_catalog="$RUNNER_TEMP/codex-model-catalog.json"
           proof_file="$GITHUB_WORKSPACE/.agentinterposer-codex-proof"
           pid=''
 
@@ -456,18 +457,66 @@ jobs:
           proof="AGENTINTERPOSER_CODEX_TOOL_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
           printf '%s\n' "$proof" > "$proof_file"
 
-          python3 - "$codex_home/config.toml" "$MODEL" <<'PY'
+          python3 - "$codex_home/config.toml" "$model_catalog" "$MODEL" <<'PY'
           import json
           import sys
 
-          path, model = sys.argv[1], sys.argv[2]
-          with open(path, "w", encoding="utf-8") as handle:
+          config_path, catalog_path, model = sys.argv[1], sys.argv[2], sys.argv[3]
+          catalog = {
+              "models": [
+                  {
+                      "slug": model,
+                      "display_name": "NVIDIA Nemotron 3 Super",
+                      "description": "NVIDIA hosted tool-use model",
+                      "default_reasoning_level": None,
+                      "supported_reasoning_levels": [],
+                      "shell_type": "default",
+                      "visibility": "none",
+                      "minimal_client_version": [0, 147, 0],
+                      "supported_in_api": True,
+                      "priority": 99,
+                      "upgrade": None,
+                      "model_messages": {
+                          "instructions_template": "You are a coding agent. Use available tools when needed and follow the user request.",
+                          "instructions_variables": None,
+                          "approvals": None,
+                          "collaboration_modes": None,
+                          "auto_review": None,
+                          "permissions": None,
+                      },
+                      "include_skills_usage_instructions": False,
+                      "include_plugin_usage_instructions": False,
+                      "include_apps_usage_instructions": False,
+                      "supports_reasoning_summary_parameter": False,
+                      "default_reasoning_summary": "none",
+                      "support_verbosity": False,
+                      "default_verbosity": None,
+                      "apply_patch_tool_type": None,
+                      "web_search_tool_type": "text",
+                      "truncation_policy": {"mode": "bytes", "limit": 10000},
+                      "supports_parallel_tool_calls": False,
+                      "supports_image_detail_original": False,
+                      "context_window": 1000000,
+                      "max_context_window": 1000000,
+                      "effective_context_window_percent": 95,
+                      "experimental_supported_tools": [],
+                      "input_modalities": ["text"],
+                      "supports_search_tool": False,
+                      "use_responses_lite": False,
+                  }
+              ]
+          }
+          with open(catalog_path, "w", encoding="utf-8") as handle:
+              json.dump(catalog, handle, separators=(",", ":"))
+
+          with open(config_path, "w", encoding="utf-8") as handle:
               handle.write(f"model = {json.dumps(model)}\n")
               handle.write('model_provider = "agentinterposer"\n')
               handle.write('approval_policy = "never"\n')
               handle.write('sandbox_mode = "read-only"\n')
               handle.write('web_search = "disabled"\n')
-              handle.write('model_reasoning_summary = "none"\n\n')
+              handle.write('model_reasoning_summary = "none"\n')
+              handle.write(f"model_catalog_json = {json.dumps(catalog_path)}\n\n")
               handle.write('[agents]\n')
               handle.write('enabled = false\n\n')
               handle.write('[model_providers.agentinterposer]\n')
@@ -550,7 +599,8 @@ jobs:
 
           echo 'codex_responses_streaming=ok'
           echo 'codex_function_call_round_trip=ok'
-          echo 'codex_reasoning_request=ok'
+          echo 'codex_model_metadata=ok'
+          echo 'codex_reasoning_request=neutral'
           echo 'codex_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Write compatibility summary
