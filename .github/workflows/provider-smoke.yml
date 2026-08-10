@@ -679,11 +679,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/agentinterposer-claude-client"
+          root='/tmp/agentinterposer-claude-client'
           cache="$RUNNER_TEMP/claude-npm-cache"
           expected_integrity='sha512-zDdtV2tzCfngxKXJLj5/UYHtCVa/yA/L0vF5dBx3w1dx5tcA8+AlyRp3qcsd/gYU7hbI/gS5OoA7C8XqJR9YtA=='
           rm -rf "$root" "$cache"
           mkdir -p "$root" "$cache"
+          chmod 0755 "$root"
 
           package="$(cd "$root" && npm --cache "$cache" pack --ignore-scripts --silent @anthropic-ai/claude-code-linux-x64@2.1.226 | tail -1)"
           package_path="$root/$package"
