@@ -761,6 +761,110 @@ jobs:
           print("codex_exact_raw_function_call=ok")
           PY
 
+          dynamic_request="$RUNNER_TEMP/codex-dynamic-metadata-request.json"
+          dynamic_response="$RUNNER_TEMP/codex-dynamic-metadata-response.sse"
+          nocache_request="$RUNNER_TEMP/codex-no-cache-metadata-request.json"
+          nocache_response="$RUNNER_TEMP/codex-no-cache-metadata-response.sse"
+          python3 - "$capture_request" "$dynamic_request" "$nocache_request" <<'PYMETA'
+          import json
+          import sys
+          import uuid
+
+          source_path, dynamic_path, nocache_path = sys.argv[1:]
+          source = json.load(open(source_path, encoding="utf-8"))
+
+          dynamic = json.loads(json.dumps(source))
+          dynamic["prompt_cache_key"] = str(uuid.uuid4())
+          metadata = dynamic.get("client_metadata")
+          if isinstance(metadata, dict):
+              dynamic["client_metadata"] = {key: str(uuid.uuid4()) for key in metadata}
+          with open(dynamic_path, "w", encoding="utf-8") as handle:
+              json.dump(dynamic, handle, separators=(",", ":"))
+
+          nocache = json.loads(json.dumps(source))
+          nocache.pop("prompt_cache_key", None)
+          nocache.pop("client_metadata", None)
+          with open(nocache_path, "w", encoding="utf-8") as handle:
+              json.dump(nocache, handle, separators=(",", ":"))
+
+          print("codex_metadata_variant_dynamic=true")
+          print("codex_metadata_variant_nocache=true")
+          PYMETA
+
+          set +e
+          dynamic_http="$(curl --silent --show-error --no-buffer \
+            --max-time 90 \
+            --output "$dynamic_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'https://integrate.api.nvidia.com/v1/responses' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --data-binary "@$dynamic_request")"
+          dynamic_curl_status=$?
+          set -e
+          echo "codex_dynamic_metadata_curl_exit=${dynamic_curl_status}"
+          echo "codex_dynamic_metadata_http=${dynamic_http}"
+          if [ "$dynamic_curl_status" -eq 0 ] && [[ "$dynamic_http" =~ ^2 ]]; then
+            python3 - "$dynamic_response" <<'PYMETAOUT'
+          import json
+          import sys
+          completed = False
+          for raw in open(sys.argv[1], encoding="utf-8"):
+              line = raw.strip()
+              if not line.startswith("data:"):
+                  continue
+              value = line.split(":", 1)[1].strip()
+              if value == "[DONE]":
+                  continue
+              try:
+                  event = json.loads(value)
+              except Exception:
+                  continue
+              if event.get("type") == "response.completed":
+                  completed = True
+                  break
+          print("codex_dynamic_metadata_completed=" + str(completed).lower())
+          PYMETAOUT
+          fi
+
+          set +e
+          nocache_http="$(curl --silent --show-error --no-buffer \
+            --max-time 90 \
+            --output "$nocache_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'https://integrate.api.nvidia.com/v1/responses' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --data-binary "@$nocache_request")"
+          nocache_curl_status=$?
+          set -e
+          echo "codex_nocache_metadata_curl_exit=${nocache_curl_status}"
+          echo "codex_nocache_metadata_http=${nocache_http}"
+          if [ "$nocache_curl_status" -eq 0 ] && [[ "$nocache_http" =~ ^2 ]]; then
+            python3 - "$nocache_response" <<'PYMETAOUT'
+          import json
+          import sys
+          completed = False
+          for raw in open(sys.argv[1], encoding="utf-8"):
+              line = raw.strip()
+              if not line.startswith("data:"):
+                  continue
+              value = line.split(":", 1)[1].strip()
+              if value == "[DONE]":
+                  continue
+              try:
+                  event = json.loads(value)
+              except Exception:
+                  continue
+              if event.get("type") == "response.completed":
+                  completed = True
+                  break
+          print("codex_nocache_metadata_completed=" + str(completed).lower())
+          PYMETAOUT
+          fi
+
           set +e
           gateway_exact_http="$(curl --silent --show-error --no-buffer \
             --max-time 90 \
