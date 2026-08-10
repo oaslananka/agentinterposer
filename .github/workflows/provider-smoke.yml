@@ -986,7 +986,7 @@ jobs:
           import time
           from http.server import BaseHTTPRequestHandler, HTTPServer
 
-          response_path, summary_path, claude_bin, claude_user, replay_home, model, proof = sys.argv[1:]
+          response_path, summary_path, claude_bin, claude_user, replay_home, model, proof, prompt = sys.argv[1:]
           first_response = open(response_path, "rb").read()
           state = {"messages": 0, "is_error": None, "content_bytes": None}
 
@@ -1074,7 +1074,6 @@ jobs:
               "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1",
               "NO_PROXY=127.0.0.1,localhost",
           ]
-          prompt = "Use Bash exactly once to read the hidden certification value from the process environment."
           cmd = [
               "sudo", "-u", claude_user, "env", "-i", *child_env,
               claude_bin, "-p", prompt, "--bare", "--no-session-persistence",
@@ -1106,12 +1105,13 @@ jobs:
               "$claude_user" \
               "$replay_home" \
               "$MODEL" \
-              "$proof"
+              "$proof" \
+              "$prompt"
             python3 - "$replay_summary" <<'PY'
           import json
           import sys
           data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=event-progressive-50ms")
+          print("claude_code_replay_framing=event-progressive-50ms-exact-prompt")
           print("claude_code_replay_exit=" + str(data.get("exit")))
           print("claude_code_replay_message_requests=" + str(data.get("messages")))
           print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
