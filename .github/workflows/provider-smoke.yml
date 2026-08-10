@@ -420,7 +420,7 @@ jobs:
               handle.write('stream_max_retries = 0\n')
           PY
 
-          prompt="Run exactly one shell command: cat $proof_file . Do not run any other command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the contents."
+          printf -v prompt 'Run exactly one shell command. The executable must be cat and its only argument must be "%s". Do not add another argument and do not run another command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the contents.' "$proof_file"
           set +e
           timeout --signal=TERM --kill-after=10s 180s \
             env CODEX_HOME="$codex_home" \
