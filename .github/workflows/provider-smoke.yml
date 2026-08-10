@@ -486,6 +486,28 @@ jobs:
           echo "codex_exit=$codex_status"
           if [ "$codex_status" -ne 0 ]; then
             echo 'Codex Responses tool round trip did not complete.' >&2
+            python3 - "$codex_stderr" <<'PYSTDERR'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+          lowered = text.lower()
+          classes = {
+              "permission_denied": ("permission denied", "eacces", "os error 13"),
+              "operation_not_permitted": ("operation not permitted", "eperm", "os error 1"),
+              "sandbox": ("sandbox", "bwrap", "bubblewrap", "landlock", "seccomp"),
+              "missing_path": ("no such file or directory", "enoent", "os error 2"),
+              "config": ("config.toml", "configuration", "config error"),
+              "model": ("model not found", "unknown model", "unsupported model"),
+              "auth": ("unauthorized", "authentication", "api key", "401", "403"),
+              "network": ("connection refused", "connection reset", "timed out", "dns", "network"),
+          }
+          matched = [name for name, needles in classes.items() if any(needle in lowered for needle in needles)]
+          print("codex_stderr_bytes=" + str(len(text.encode("utf-8"))))
+          print("codex_stderr_lines=" + str(len(text.splitlines())))
+          print("codex_stderr_classes=" + (",".join(matched) if matched else "other"))
+          PYSTDERR
           fi
 
           set +e
