@@ -40,7 +40,7 @@ jobs:
           fi
 
       - name: Install Doppler CLI
-        uses: DopplerHQ/cli-action@12f29f902bf9279a3888501b9d27ba9f968a07c2 # v4.0.1
+        uses: DopplerHQ/cli-action@4819d808ab99e5cde19a0637a16536a4038fad73 # v4.0.1
 
       - name: Fetch NVIDIA credential from Doppler
         id: doppler
