@@ -291,26 +291,44 @@ jobs:
             echo 'Codex certification is currently defined only for nvidia/nemotron-3-super-120b-a12b.' >&2
             exit 2
           fi
-          codex_root="$RUNNER_TEMP/codex-cli"
-          codex_home="$RUNNER_TEMP/codex-home"
+          codex_user='agentinterposer-codex'
+          codex_root="/tmp/agentinterposer-codex-cli-${GITHUB_RUN_ID}"
+          codex_home="/tmp/agentinterposer-codex-home-${GITHUB_RUN_ID}"
+          codex_run_dir="/tmp/agentinterposer-codex-run-${GITHUB_RUN_ID}"
           binary="$RUNNER_TEMP/agentinterposer-codex"
           gateway_log="$RUNNER_TEMP/agentinterposer-codex.log"
-          codex_jsonl="$RUNNER_TEMP/codex-events.jsonl"
-          codex_stderr="$RUNNER_TEMP/codex-stderr.log"
-          final_message="$RUNNER_TEMP/codex-final.txt"
-          model_catalog="$RUNNER_TEMP/codex-model-catalog.json"
+          codex_jsonl="$codex_run_dir/codex-events.jsonl"
+          codex_stderr="$codex_run_dir/codex-stderr.log"
+          final_message="$codex_run_dir/codex-final.txt"
+          model_catalog="$codex_home/codex-model-catalog.json"
           pid=''
+          codex_user_created=false
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
 
           cleanup() {
             if [ -n "$pid" ]; then
               kill "$pid" 2>/dev/null || true
               wait "$pid" 2>/dev/null || true
             fi
+            if [ "$codex_user_created" = true ]; then
+              sudo userdel "$codex_user" 2>/dev/null || true
+            fi
+            sudo rm -rf "$codex_root" "$codex_home" "$codex_run_dir"
           }
           trap cleanup EXIT
 
-          mkdir -p "$codex_root" "$codex_home"
+          if id "$codex_user" >/dev/null 2>&1; then
+            echo 'Dedicated Codex certification user unexpectedly already exists.' >&2
+            exit 1
+          fi
+          sudo useradd --system --home-dir "$codex_home" --shell /bin/bash "$codex_user"
+          codex_user_created=true
+          sudo install -d -m 0700 -o "$codex_user" -g "$codex_user" "$codex_home"
+          sudo install -d -m 0770 -o "$codex_user" -g "$runner_gid" "$codex_run_dir"
+          mkdir -p "$codex_root"
           npm install --prefix "$codex_root" --no-audit --no-fund --silent '@openai/codex@0.147.0'
+          chmod -R a+rX "$codex_root"
           codex="$codex_root/node_modules/.bin/codex"
           codex_version="$($codex --version)"
           if [ "$codex_version" != 'codex-cli 0.147.0' ]; then
@@ -337,7 +355,8 @@ jobs:
             exit 1
           fi
 
-          python3 - "$codex_home/config.toml" "$model_catalog" "$MODEL" <<'PY'
+          sudo -u "$codex_user" -- env -i PATH='/usr/bin:/bin' \
+            python3 - "$codex_home/config.toml" "$model_catalog" "$MODEL" <<'PY'
           import json
           import sys
 
@@ -415,21 +434,53 @@ jobs:
               handle.write('stream_max_retries = 0\n')
           PY
 
+          runner_shell_pid=$$
+          codex_uid="$(id -u "$codex_user")"
+          if [ "$runner_uid" = "$codex_uid" ]; then
+            echo 'Codex certification user is not UID-isolated from the runner.' >&2
+            exit 1
+          fi
+          for protected_pid in "$runner_shell_pid" "$pid"; do
+            if sudo -u "$codex_user" -- bash -c "exec 3<\"/proc/\$1/environ\"" bash "$protected_pid" 2>/dev/null; then
+              echo 'Codex certification user can read a protected runner process environment.' >&2
+              exit 1
+            fi
+          done
+
+          node_bin_dir="$(dirname "$(command -v node)")"
+          codex_env_names="$(sudo -u "$codex_user" -- env -i \
+            HOME="$codex_home" \
+            PATH="$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+            CODEX_HOME="$codex_home" \
+            AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
+            env | cut -d= -f1 | sort)"
+          for forbidden_name in NVIDIA_API_KEY DOPPLER_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN; do
+            if grep -qx "$forbidden_name" <<<"$codex_env_names"; then
+              echo "Forbidden credential environment name reached Codex: $forbidden_name" >&2
+              exit 1
+            fi
+          done
+          echo 'codex_os_user_isolation=ok'
+          echo 'codex_secret_environment_isolation=ok'
+
           prompt='Run exactly one shell command. The executable must be cat and its only argument must be /proc/sys/kernel/random/uuid. Do not add another argument and do not run another command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the value.'
           set +e
           timeout --signal=TERM --kill-after=10s 180s \
-            env -u NVIDIA_API_KEY \
-            CODEX_HOME="$codex_home" \
-            AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
-            "$codex" exec \
-              --ephemeral \
-              --sandbox read-only \
-              --ignore-rules \
-              --json \
-              --output-last-message "$final_message" \
-              "$prompt" >"$codex_jsonl" 2>"$codex_stderr"
+            sudo -u "$codex_user" -- bash -c "cd \"\$1\" && shift && exec env -i \"\$@\"" bash "$codex_run_dir" \
+              HOME="$codex_home" \
+              PATH="$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+              CODEX_HOME="$codex_home" \
+              AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
+              "$codex" exec \
+                --ephemeral \
+                --sandbox read-only \
+                --ignore-rules \
+                --json \
+                --output-last-message "$final_message" \
+                "$prompt" >"$codex_jsonl" 2>"$codex_stderr"
           codex_status=$?
           set -e
+          sudo chown -R "$runner_uid:$runner_gid" "$codex_run_dir"
 
           echo "codex_cli_version=$codex_version"
           echo "codex_exit=$codex_status"
