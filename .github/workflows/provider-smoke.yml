@@ -415,14 +415,21 @@ jobs:
           final_message="$RUNNER_TEMP/codex-final.txt"
           model_catalog="$RUNNER_TEMP/codex-model-catalog.json"
           proof_file="$GITHUB_WORKSPACE/.agentinterposer-codex-proof"
+          capture_request="$RUNNER_TEMP/codex-captured-request.json"
+          capture_home="$RUNNER_TEMP/codex-capture-home"
+          exact_response="$RUNNER_TEMP/codex-exact-response.sse"
           pid=''
+          capture_pid=''
+          capture_gateway_pid=''
 
           cleanup() {
             rm -f "$proof_file"
-            if [ -n "$pid" ]; then
-              kill "$pid" 2>/dev/null || true
-              wait "$pid" 2>/dev/null || true
-            fi
+            for child in "$capture_gateway_pid" "$capture_pid" "$pid"; do
+              if [ -n "$child" ]; then
+                kill "$child" 2>/dev/null || true
+                wait "$child" 2>/dev/null || true
+              fi
+            done
           }
           trap cleanup EXIT
 
@@ -529,6 +536,167 @@ jobs:
           PY
 
           prompt="Use the shell tool to read the exact contents of $proof_file. Then reply with exactly the file contents and nothing else. Do not guess or infer the contents."
+
+          mkdir -p "$capture_home"
+          python3 - "$codex_home/config.toml" "$capture_home/config.toml" <<'PY'
+          import sys
+
+          source, target = sys.argv[1], sys.argv[2]
+          text = open(source, encoding="utf-8").read()
+          text = text.replace("http://127.0.0.1:11435/v1", "http://127.0.0.1:11436/v1")
+          with open(target, "w", encoding="utf-8") as handle:
+              handle.write(text)
+          PY
+
+          capture_server="$RUNNER_TEMP/codex-capture-server.py"
+          cat > "$capture_server" <<'PY'
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          import os
+
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, *_args):
+                  return
+
+              def do_POST(self):
+                  length = int(self.headers.get("content-length", "0"))
+                  with open(os.environ["CAPTURE_REQUEST"], "wb") as handle:
+                      handle.write(self.rfile.read(length))
+                  self.send_response(500)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(b'{"error":{"message":"capture-stop"}}')
+
+          ThreadingHTTPServer(("127.0.0.1", 18113), Handler).serve_forever()
+          PY
+
+          CAPTURE_REQUEST="$capture_request" python3 "$capture_server" >"$RUNNER_TEMP/codex-capture-server.log" 2>&1 &
+          capture_pid=$!
+          AGENTINTERPOSER_ADDR='127.0.0.1:11436' \
+            AGENTINTERPOSER_UPSTREAM_URL='http://127.0.0.1:18113' \
+            AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN='capture-only' \
+            AGENTINTERPOSER_MAX_RETRIES=0 \
+            "$binary" >"$RUNNER_TEMP/agentinterposer-capture.log" 2>&1 &
+          capture_gateway_pid=$!
+
+          capture_ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11436/healthz' >/dev/null; then
+              capture_ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$capture_ready" != true ]; then
+            echo 'Capture-only AgentInterposer did not become ready.' >&2
+            exit 1
+          fi
+
+          set +e
+          CODEX_HOME="$capture_home" \
+            AGENTINTERPOSER_CLIENT_KEY='capture-client-placeholder' \
+            "$codex" exec \
+              --ephemeral \
+              --sandbox read-only \
+              --ignore-rules \
+              --json \
+              "$prompt" >"$RUNNER_TEMP/codex-capture-events.jsonl" 2>"$RUNNER_TEMP/codex-capture-stderr.log"
+          capture_status=$?
+          set -e
+          echo "codex_capture_exit=${capture_status}"
+
+          for _ in {1..30}; do
+            if [ -s "$capture_request" ]; then
+              break
+            fi
+            sleep 0.1
+          done
+          if [ ! -s "$capture_request" ]; then
+            echo 'Codex capture produced no Responses request.' >&2
+            exit 1
+          fi
+
+          kill "$capture_gateway_pid" "$capture_pid" 2>/dev/null || true
+          wait "$capture_gateway_pid" 2>/dev/null || true
+          wait "$capture_pid" 2>/dev/null || true
+          capture_gateway_pid=''
+          capture_pid=''
+
+          python3 - "$capture_request" <<'PY'
+          import json
+          import sys
+
+          raw = open(sys.argv[1], "rb").read()
+          data = json.loads(raw)
+          tools = data.get("tools") or []
+          if data.get("stream") is not True:
+              raise SystemExit("Captured Codex request did not enable Responses streaming")
+          if not tools or not all(isinstance(tool, dict) and tool.get("type") == "function" for tool in tools):
+              raise SystemExit("Captured Codex request did not contain only function tools")
+          print("codex_capture_bytes=" + str(len(raw)))
+          print("codex_capture_tool_count=" + str(len(tools)))
+          print("codex_capture_reasoning=" + json.dumps(data.get("reasoning"), sort_keys=True, separators=(",", ":")))
+          PY
+
+          set +e
+          exact_http="$(curl --silent --show-error --no-buffer \
+            --max-time 90 \
+            --output "$exact_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'https://integrate.api.nvidia.com/v1/responses' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --data-binary "@$capture_request")"
+          exact_curl_status=$?
+          set -e
+          echo "codex_exact_raw_curl_exit=${exact_curl_status}"
+          echo "codex_exact_raw_http=${exact_http}"
+          if [ "$exact_curl_status" -ne 0 ]; then
+            echo 'Exact captured Codex request timed out at NVIDIA Responses.' >&2
+            exit "$exact_curl_status"
+          fi
+          if [[ ! "$exact_http" =~ ^2 ]]; then
+            echo 'Exact captured Codex request returned a non-2xx status.' >&2
+            exit 1
+          fi
+
+          python3 - "$exact_response" <<'PY'
+          import json
+          import sys
+
+          events = []
+          function_call_seen = False
+          completed_seen = False
+          for raw in open(sys.argv[1], encoding="utf-8"):
+              line = raw.strip()
+              if line.startswith("event:"):
+                  events.append(line.split(":", 1)[1].strip())
+                  continue
+              if not line.startswith("data:"):
+                  continue
+              payload = line.split(":", 1)[1].strip()
+              if payload == "[DONE]":
+                  continue
+              try:
+                  data = json.loads(payload)
+              except Exception:
+                  continue
+              event_type = data.get("type")
+              if event_type:
+                  events.append(str(event_type))
+              item = data.get("item")
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  function_call_seen = True
+              if event_type == "response.completed":
+                  completed_seen = True
+          print("codex_exact_raw_events=" + ",".join(dict.fromkeys(events)))
+          if not completed_seen:
+              raise SystemExit("Exact Codex request emitted no response.completed event")
+          if not function_call_seen:
+              raise SystemExit("Exact Codex request emitted no function_call item")
+          print("codex_exact_raw_function_call=ok")
+          PY
+
           set +e
           timeout --signal=TERM --kill-after=10s 180s \
             env CODEX_HOME="$codex_home" \
