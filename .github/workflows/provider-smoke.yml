@@ -733,6 +733,8 @@ jobs:
           claude_user='agentinterposer-claude'
           claude_home='/tmp/agentinterposer-claude-home'
           claude_settings='/tmp/agentinterposer-claude-home/settings.json'
+          claude_shell_prefix='/tmp/agentinterposer-claude-home/shell-prefix.sh'
+          claude_shell_prefix_marker='/tmp/agentinterposer-claude-home/shell-prefix.called'
           pid=''
 
           cleanup() {
@@ -856,6 +858,14 @@ jobs:
           printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
           sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-code-settings.json" "$claude_settings"
           rm -f "$RUNNER_TEMP/claude-code-settings.json"
+          cat > "$RUNNER_TEMP/claude-shell-prefix.sh" <<'SH'
+          #!/bin/bash
+          set -e
+          : > "$HOME/shell-prefix.called"
+          exec /bin/bash -lc "$1"
+          SH
+          sudo install -o "$claude_user" -g "$claude_user" -m 0700 "$RUNNER_TEMP/claude-shell-prefix.sh" "$claude_shell_prefix"
+          rm -f "$RUNNER_TEMP/claude-shell-prefix.sh"
           shell_pid=$$
           if sudo -u "$claude_user" sh -c "cat /proc/$shell_pid/environ >/dev/null 2>&1"; then
             echo 'Claude Code isolation failed: runner environment is readable.' >&2
@@ -902,7 +912,7 @@ jobs:
             HOME="$claude_home" \
             PATH="/usr/local/bin:/usr/bin:/bin" \
             CLAUDE_CODE_SHELL='/bin/bash' \
-            CLAUDE_BASH_NO_LOGIN='true' \
+            CLAUDE_CODE_SHELL_PREFIX="$claude_shell_prefix" \
             AGENTINTERPOSER_TOOL_PROOF="$proof" \
             CLAUDE_CONFIG_DIR="$claude_home/.claude" \
             ANTHROPIC_BASE_URL='http://127.0.0.1:11434' \
@@ -929,6 +939,11 @@ jobs:
           claude_exit=$?
           set -e
           echo "claude_code_exit=${claude_exit}"
+          if sudo -u "$claude_user" test -f "$claude_shell_prefix_marker"; then
+            echo 'claude_code_shell_prefix_called=true'
+          else
+            echo 'claude_code_shell_prefix_called=false'
+          fi
           if [ "$claude_exit" -ne 0 ]; then
             python3 - "$claude_capture_dir" <<'PY'
           import glob
