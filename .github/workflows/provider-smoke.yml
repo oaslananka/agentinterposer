@@ -327,7 +327,8 @@ jobs:
               handle.write('model_provider = "agentinterposer"\n')
               handle.write('approval_policy = "never"\n')
               handle.write('sandbox_mode = "read-only"\n')
-              handle.write('web_search = "disabled"\n\n')
+              handle.write('web_search = "disabled"\n')
+              handle.write('model_reasoning_summary = "none"\n\n')
               handle.write('[agents]\n')
               handle.write('enabled = false\n\n')
               handle.write('[model_providers.agentinterposer]\n')
@@ -341,7 +342,8 @@ jobs:
 
           prompt="Use the shell tool to read the exact contents of $proof_file. Then reply with exactly the file contents and nothing else. Do not guess or infer the contents."
           set +e
-          CODEX_HOME="$codex_home" \
+          timeout --signal=TERM --kill-after=10s 180s \
+            env CODEX_HOME="$codex_home" \
             AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
             "$codex" exec \
               --ephemeral \
@@ -357,7 +359,37 @@ jobs:
           echo "codex_exit=$codex_status"
           if [ "$codex_status" -ne 0 ]; then
             echo 'Codex Responses compatibility probe failed.' >&2
-            tail -n 30 "$codex_stderr" >&2 || true
+            echo "codex_failure_status=$codex_status" >&2
+            python3 - "$codex_jsonl" <<'PY'
+          import json
+          import sys
+
+          path = sys.argv[1]
+          counts = {}
+          errors = []
+          try:
+              lines = open(path, encoding="utf-8")
+          except OSError:
+              lines = []
+          for raw in lines:
+              try:
+                  event = json.loads(raw)
+              except Exception:
+                  continue
+              event_type = str(event.get("type") or "unknown")
+              counts[event_type] = counts.get(event_type, 0) + 1
+              error = event.get("error")
+              if isinstance(error, dict):
+                  message = error.get("message") or error.get("type")
+                  if message:
+                      errors.append(str(message)[:240])
+              elif error:
+                  errors.append(str(error)[:240])
+          print("codex_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)), file=sys.stderr)
+          for message in errors[-3:]:
+              print("codex_event_error=" + message, file=sys.stderr)
+          PY
+            tail -n 20 "$codex_stderr" >&2 || true
             exit "$codex_status"
           fi
 
