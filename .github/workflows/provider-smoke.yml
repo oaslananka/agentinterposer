@@ -469,15 +469,40 @@ jobs:
               status = str(item.get("status") or "unknown")
               exit_code = item.get("exit_code")
               output = item.get("aggregated_output")
+              command = item.get("command")
               output_bytes = len(output.encode("utf-8")) if isinstance(output, str) else 0
-              command_results.append((status, exit_code, output_bytes))
+              command_results.append((status, exit_code, output_bytes, command, output))
               if status == "completed" and exit_code == 0 and isinstance(output, str):
                   successful_outputs.append(output)
 
           print("codex_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)))
           print("codex_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)))
-          for index, (status, exit_code, output_bytes) in enumerate(command_results, start=1):
+          import os
+          import shlex
+
+          for index, (status, exit_code, output_bytes, command, output) in enumerate(command_results, start=1):
               print(f"codex_command_result_{index}=status:{status},exit:{exit_code},output_bytes:{output_bytes}")
+              argv = []
+              if isinstance(command, str):
+                  try:
+                      argv = shlex.split(command)
+                  except ValueError:
+                      pass
+              executable = os.path.basename(argv[0]) if argv else "unparsed"
+              has_metachar = isinstance(command, str) and any(token in command for token in (";", "&&", "||", "|", "`", "$(`"))
+              print(f"codex_command_shape_{index}=executable:{executable},argv_count:{len(argv)},uuid_path:{'/proc/sys/kernel/random/uuid' in argv},metachar:{str(has_metachar).lower()}")
+              lowered = output.lower() if isinstance(output, str) else ""
+              classes = {
+                  "permission_denied": "permission denied" in lowered,
+                  "no_such_file": "no such file" in lowered,
+                  "is_directory": "is a directory" in lowered,
+                  "not_found": "not found" in lowered,
+                  "syntax_error": "syntax error" in lowered,
+                  "operation_not_permitted": "operation not permitted" in lowered,
+                  "sandbox": "sandbox" in lowered,
+              }
+              matched = [key for key, value in classes.items() if value]
+              print("codex_command_error_class_" + str(index) + "=" + (",".join(matched) if matched else "other"))
           print("codex_completed_command_count=" + str(len(command_results)))
 
           if len(command_results) != 1 or len(successful_outputs) != 1:
