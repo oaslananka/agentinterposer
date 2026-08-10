@@ -1098,6 +1098,51 @@ jobs:
               print("claude_code_bash_command_token_count=" + str(len(tokens)))
               print("claude_code_bash_command_semantic_exact=" + str(tokens == ["echo", "$AGENTINTERPOSER_TOOL_PROOF"]).lower())
 
+          execution_shapes = []
+          for event in events:
+              for obj in walk(event):
+                  if not isinstance(obj, dict):
+                      continue
+                  if not {"stdout", "stderr", "exitCode", "exit_code", "tool_use_result"}.intersection(obj):
+                      continue
+                  parts = ["keys=" + "+".join(sorted(obj))]
+                  for key in ("exitCode", "exit_code"):
+                      if isinstance(obj.get(key), int):
+                          parts.append(key + "=" + str(obj[key]))
+                  for key in ("stdout", "stderr"):
+                      value = obj.get(key)
+                      if not isinstance(value, str):
+                          continue
+                      parts.append(key + "_bytes=" + str(len(value.encode("utf-8"))))
+                      if key == "stderr":
+                          lowered = value.lower()
+                          classes = []
+                          for token, label in [
+                              ("unbound variable", "unbound-variable"),
+                              ("permission denied", "permission"),
+                              ("operation not permitted", "operation-not-permitted"),
+                              ("no such file", "no-such-file"),
+                              ("not found", "not-found"),
+                              ("sandbox", "sandbox"),
+                              ("bwrap", "bwrap"),
+                              ("shell snapshot", "shell-snapshot"),
+                              ("login shell", "login-shell"),
+                              ("spawn", "spawn"),
+                              ("exec", "exec"),
+                          ]:
+                              if token in lowered and label not in classes:
+                                  classes.append(label)
+                          parts.append("stderr_classes=" + ("+".join(classes) if classes else "other"))
+                  nested = obj.get("tool_use_result")
+                  if isinstance(nested, str):
+                      parts.append("tool_use_result_kind=str")
+                      parts.append("tool_use_result_bytes=" + str(len(nested.encode("utf-8"))))
+                  elif isinstance(nested, dict):
+                      parts.append("tool_use_result_kind=dict")
+                      parts.append("tool_use_result_keys=" + "+".join(sorted(nested)))
+                  execution_shapes.append(";".join(parts))
+          print("claude_code_execution_shapes=" + ("|".join(execution_shapes[:8]) if execution_shapes else "none"))
+
           permission_events = [
               event for event in events
               if event.get("type") == "system" and event.get("subtype") == "permission_denied"
