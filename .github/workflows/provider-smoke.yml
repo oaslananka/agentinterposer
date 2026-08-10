@@ -417,6 +417,9 @@ jobs:
           proof_file="$GITHUB_WORKSPACE/.agentinterposer-codex-proof"
           capture_request="$RUNNER_TEMP/codex-captured-request.json"
           capture_home="$RUNNER_TEMP/codex-capture-home"
+          direct_home="$RUNNER_TEMP/codex-direct-home"
+          direct_jsonl="$RUNNER_TEMP/codex-direct-events.jsonl"
+          direct_final="$RUNNER_TEMP/codex-direct-final.txt"
           exact_response="$RUNNER_TEMP/codex-exact-response.sse"
           gateway_exact_response="$RUNNER_TEMP/codex-gateway-exact-response.sse"
           direct_headers="$RUNNER_TEMP/codex-direct-response.headers"
@@ -878,8 +881,78 @@ jobs:
           print("codex_gateway_exact_function_call=ok")
           PY
 
+          mkdir -p "$direct_home"
+          python3 - "$codex_home/config.toml" "$direct_home/config.toml" <<'PY'
+          import sys
+
+          source, target = sys.argv[1], sys.argv[2]
+          text = open(source, encoding="utf-8").read()
+          text = text.replace('name = "AgentInterposer certification"', 'name = "NVIDIA direct diagnostic"')
+          text = text.replace('base_url = "http://127.0.0.1:11435/v1"', 'base_url = "https://integrate.api.nvidia.com/v1"')
+          text = text.replace('env_key = "AGENTINTERPOSER_CLIENT_KEY"', 'env_key = "NVIDIA_DIRECT_KEY"')
+          with open(target, "w", encoding="utf-8") as handle:
+              handle.write(text)
+          PY
+
           set +e
-          timeout --signal=TERM --kill-after=10s 180s \
+          timeout --signal=TERM --kill-after=10s 120s \
+            env CODEX_HOME="$direct_home" \
+            NVIDIA_DIRECT_KEY="$NVIDIA_API_KEY" \
+            "$codex" exec \
+              --ephemeral \
+              --sandbox read-only \
+              --ignore-rules \
+              --json \
+              --output-last-message "$direct_final" \
+              "$prompt" >"$direct_jsonl" 2>"$RUNNER_TEMP/codex-direct-stderr.log"
+          direct_codex_status=$?
+          set -e
+          echo "codex_direct_exit=${direct_codex_status}"
+          if [ "$direct_codex_status" -ne 0 ]; then
+            python3 - "$direct_jsonl" <<'PY'
+          import json
+          import sys
+
+          counts = {}
+          item_counts = {}
+          errors = []
+          try:
+              lines = open(sys.argv[1], encoding="utf-8")
+          except OSError:
+              lines = []
+          for raw in lines:
+              try:
+                  event = json.loads(raw)
+              except Exception:
+                  continue
+              event_type = str(event.get("type") or "unknown")
+              counts[event_type] = counts.get(event_type, 0) + 1
+              item = event.get("item")
+              if isinstance(item, dict):
+                  item_type = str(item.get("type") or "unknown")
+                  item_counts[item_type] = item_counts.get(item_type, 0) + 1
+                  if item_type == "error":
+                      message = item.get("message") or item.get("error")
+                      if message:
+                          errors.append(str(message)[:240])
+          print("codex_direct_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)), file=sys.stderr)
+          print("codex_direct_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)), file=sys.stderr)
+          for message in errors[-3:]:
+              print("codex_direct_event_error=" + message, file=sys.stderr)
+          PY
+            echo 'Direct Codex-to-NVIDIA Responses diagnostic failed.' >&2
+            exit "$direct_codex_status"
+          fi
+
+          direct_actual="$(tr -d '\r\n' < "$direct_final")"
+          if [ "$direct_actual" != "$proof" ]; then
+            echo 'Direct Codex-to-NVIDIA final response did not match the proof value.' >&2
+            exit 1
+          fi
+          echo 'codex_direct_nvidia_tool_round_trip=ok'
+
+          set +e
+          timeout --signal=TERM --kill-after=10s 120s \
             env CODEX_HOME="$codex_home" \
             AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
             "$codex" exec \
