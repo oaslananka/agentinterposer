@@ -13,6 +13,7 @@ import (
 type anthropicMessagesRequest struct {
 	Model         string                  `json:"model"`
 	MaxTokens     int                     `json:"max_tokens"`
+	Metadata      *anthropicMetadata      `json:"metadata"`
 	Messages      []anthropicInputMessage `json:"messages"`
 	System        json.RawMessage         `json:"system"`
 	Stream        bool                    `json:"stream"`
@@ -29,23 +30,34 @@ type anthropicInputMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
+type anthropicMetadata struct {
+	UserID string `json:"user_id"`
+}
+
+type anthropicCacheControl struct {
+	Type string `json:"type"`
+	TTL  string `json:"ttl"`
+}
+
 type anthropicContentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text"`
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Input     json.RawMessage `json:"input"`
-	ToolUseID string          `json:"tool_use_id"`
-	Content   json.RawMessage `json:"content"`
-	IsError   bool            `json:"is_error"`
+	Type         string                 `json:"type"`
+	CacheControl *anthropicCacheControl `json:"cache_control"`
+	Text         string                 `json:"text"`
+	ID           string                 `json:"id"`
+	Name         string                 `json:"name"`
+	Input        json.RawMessage        `json:"input"`
+	ToolUseID    string                 `json:"tool_use_id"`
+	Content      json.RawMessage        `json:"content"`
+	IsError      bool                   `json:"is_error"`
 }
 
 type anthropicTool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema"`
-	Strict      *bool           `json:"strict"`
+	Type         string                 `json:"type"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description"`
+	InputSchema  json.RawMessage        `json:"input_schema"`
+	Strict       *bool                  `json:"strict"`
+	CacheControl *anthropicCacheControl `json:"cache_control"`
 }
 
 type anthropicToolChoice struct {
@@ -207,6 +219,9 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletionRequest, error) {
+	if err := validateAnthropicMetadata(request.Metadata); err != nil {
+		return chatCompletionRequest{}, err
+	}
 	if strings.TrimSpace(request.Model) == "" {
 		return chatCompletionRequest{}, errors.New("model is required")
 	}
@@ -254,6 +269,9 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	}
 
 	for _, tool := range request.Tools {
+		if err := validateAnthropicCacheControl(tool.CacheControl); err != nil {
+			return chatCompletionRequest{}, fmt.Errorf("tool %q cache_control: %w", tool.Name, err)
+		}
 		if tool.Type != "" {
 			return chatCompletionRequest{}, fmt.Errorf("tool type %q is not supported; only custom client tools are supported", tool.Type)
 		}
@@ -327,6 +345,9 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 		var text strings.Builder
 		var calls []chatToolCall
 		for _, block := range blocks {
+			if err := validateAnthropicCacheControl(block.CacheControl); err != nil {
+				return nil, nil, fmt.Errorf("assistant cache_control: %w", err)
+			}
 			switch block.Type {
 			case "text":
 				text.WriteString(block.Text)
@@ -361,6 +382,9 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 	var result []chatMessage
 	var text strings.Builder
 	for _, block := range blocks {
+		if err := validateAnthropicCacheControl(block.CacheControl); err != nil {
+			return nil, nil, fmt.Errorf("user cache_control: %w", err)
+		}
 		switch block.Type {
 		case "text":
 			text.WriteString(block.Text)
@@ -402,12 +426,42 @@ func decodeTextContent(raw json.RawMessage, field string) (string, error) {
 	}
 	var text strings.Builder
 	for _, block := range blocks {
+		if err := validateAnthropicCacheControl(block.CacheControl); err != nil {
+			return "", fmt.Errorf("%s cache_control: %w", field, err)
+		}
 		if block.Type != "text" {
 			return "", fmt.Errorf("unsupported %s content block %q", field, block.Type)
 		}
 		text.WriteString(block.Text)
 	}
 	return text.String(), nil
+}
+
+// Anthropic metadata and cache-control values are validated for protocol fidelity,
+// but they are intentionally not forwarded to a different upstream provider.
+func validateAnthropicMetadata(metadata *anthropicMetadata) error {
+	if metadata == nil {
+		return nil
+	}
+	if len([]rune(metadata.UserID)) > 512 {
+		return errors.New("metadata.user_id must be at most 512 characters")
+	}
+	return nil
+}
+
+func validateAnthropicCacheControl(cacheControl *anthropicCacheControl) error {
+	if cacheControl == nil {
+		return nil
+	}
+	if cacheControl.Type != "ephemeral" {
+		return fmt.Errorf("type %q is not supported; expected ephemeral", cacheControl.Type)
+	}
+	switch cacheControl.TTL {
+	case "", "5m", "1h":
+		return nil
+	default:
+		return fmt.Errorf("ttl %q is not supported; expected 5m or 1h", cacheControl.TTL)
+	}
 }
 
 func decodeJSONString(raw json.RawMessage) (string, bool, error) {
