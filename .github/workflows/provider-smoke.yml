@@ -448,7 +448,8 @@ jobs:
           fi
 
           go build -trimpath -o "$binary" ./cmd/agentinterposer
-          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+          GODEBUG='http2client=0' \
+            AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
             NVIDIA_API_KEY="$NVIDIA_API_KEY" \
             "$binary" >"$gateway_log" 2>&1 &
           pid=$!
