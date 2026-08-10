@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and a non-streaming Anthropic Messages adapter for text and custom client tools. A manual compatibility probe verifies Codex CLI `0.147.0` with `nvidia/nemotron-3-super-120b-a12b` for a real Responses shell-tool round trip through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text and custom client tools in both non-streaming and SSE streaming modes. A manual compatibility probe verifies Codex CLI `0.147.0` with `nvidia/nemotron-3-super-120b-a12b` for a real Responses shell-tool round trip through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -23,7 +23,7 @@ The first vertical slice supports:
 - `GET /healthz`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
-- `POST /v1/messages` for non-streaming Anthropic-compatible text and custom client-tool requests
+- `POST /v1/messages` for Anthropic-compatible text and custom client-tool requests, including SSE streaming
 - OpenAI-compatible request/response passthrough to an upstream provider without JSON translation
 - server-owned upstream bearer authentication (client credentials are not forwarded)
 - bounded upstream concurrency (default: `3`)
@@ -54,7 +54,7 @@ Coding agent / OpenAI-compatible client
         (NVIDIA by default)
 ```
 
-OpenAI Responses uses native passthrough through the same reliability core. The current Anthropic Messages path translates non-streaming text and custom client-tool requests to OpenAI-compatible Chat Completions when the selected upstream does not expose a usable hosted `/v1/messages` endpoint. Streaming Messages, image/thinking blocks, and broader Anthropic-specific features remain outside this adapter slice.
+OpenAI Responses uses native passthrough through the same reliability core. The Anthropic Messages path translates text and custom client-tool requests to OpenAI-compatible Chat Completions when the selected upstream does not expose a usable hosted `/v1/messages` endpoint. Text deltas are flushed as Anthropic SSE events. Streaming tool-call arguments are buffered until they form valid JSON, then emitted as a `tool_use` block with `input_json_delta`. Image/thinking blocks and broader Anthropic-specific features remain outside this adapter slice.
 
 ## Quick start
 
@@ -117,7 +117,7 @@ curl http://127.0.0.1:11435/v1/responses \
 
 This establishes the transport needed by Responses-based clients. The manual `Provider Smoke` workflow can also run the current `scope=codex` certification path: Codex CLI `0.147.0` -> AgentInterposer -> NVIDIA hosted Responses -> shell function call -> tool output -> final response. Other Codex versions, models, tool surfaces, and longer agent loops remain uncertified.
 
-Send a non-streaming Anthropic Messages request:
+Send an Anthropic Messages request:
 
 ```bash
 curl http://127.0.0.1:11435/v1/messages \
@@ -130,7 +130,21 @@ curl http://127.0.0.1:11435/v1/messages \
   }'
 ```
 
-This adapter currently covers non-streaming text, custom client `tools`, `tool_choice`, `tool_use`, and successful `tool_result` blocks. `stream: true`, `stop_sequences`, image/thinking blocks, server tools, and `tool_result` blocks with `is_error: true` are rejected rather than silently translated. The manual Provider Smoke `scope=messages` verifies a real NVIDIA-hosted text request and tool-result round trip.
+To stream the same protocol, set `"stream": true`:
+
+```bash
+curl --no-buffer http://127.0.0.1:11435/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{
+    "model": "nvidia/nemotron-3-super-120b-a12b",
+    "max_tokens": 64,
+    "stream": true,
+    "messages": [{"role": "user", "content": "Reply briefly with OK"}]
+  }'
+```
+
+This adapter covers text, custom client `tools`, `tool_choice`, `tool_use`, and successful `tool_result` blocks in non-streaming mode, plus SSE streaming for text and custom client tool calls. In streaming mode, text deltas are forwarded incrementally while tool arguments are buffered until valid JSON is available and then emitted as a single valid `input_json_delta`. The adapter requests terminal usage from the upstream Chat Completions stream; `message_start` begins with zero counters because hosted Chat Completions supplies authoritative token usage at the terminal usage chunk, and the final `message_delta` reports those cumulative counts. `stop_sequences`, image/thinking blocks, server tools, and `tool_result` blocks with `is_error: true` are rejected rather than silently translated. Manual Provider Smoke scopes `messages` and `messages-stream` verify the non-streaming round trip and the real NVIDIA-hosted text/tool SSE paths respectively.
 
 ## Configuration
 
@@ -152,8 +166,8 @@ For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_
 Near-term work is intentionally compatibility-first:
 
 1. Broaden Codex/Responses certification beyond the current single-shell-tool Nemotron 3 Super profile to additional tools, agent loops, Codex versions, and models.
-2. Add Anthropic Messages SSE streaming and broaden the adapter beyond the current text/custom-client-tool slice.
-3. Streaming tool-call and reasoning normalization tests.
+2. Broaden the Anthropic Messages adapter beyond the current text/custom-client-tool slice, including image/thinking and richer error/result semantics.
+3. Broaden Messages streaming certification across additional models and parallel/multi-turn tool patterns.
 4. Model capability profiles and compatibility certification tests.
 5. Capability-aware fallback and provider routing.
 6. Agent configuration helpers for Codex, Claude Code, OpenCode, and compatible VS Code clients.

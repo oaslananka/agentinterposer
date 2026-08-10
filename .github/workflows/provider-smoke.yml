@@ -17,6 +17,7 @@ on:
           - baseline
           - full
           - messages
+          - messages-stream
           - codex
 
 permissions:
@@ -470,6 +471,207 @@ jobs:
           PY
           echo 'messages_adapter_verified=true' >> "$GITHUB_OUTPUT"
 
+      - name: Probe AgentInterposer Messages streaming adapter
+        if: ${{ inputs.scope == 'messages-stream' }}
+        id: messages_stream_gateway
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/agentinterposer-messages-stream"
+          log="$RUNNER_TEMP/agentinterposer-messages-stream.log"
+          text_request="$(mktemp)"
+          text_response="$(mktemp)"
+          text_headers="$(mktemp)"
+          tool_request="$(mktemp)"
+          tool_response="$(mktemp)"
+          tool_headers="$(mktemp)"
+          pid=''
+
+          cleanup() {
+            rm -f "$text_request" "$text_response" "$text_headers" "$tool_request" "$tool_response" "$tool_headers"
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$log" 2>&1 &
+          pid=$!
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for the Messages streaming probe.' >&2
+            exit 1
+          fi
+
+          python3 - "$MODEL" "$text_request" "$tool_request" <<'PY'
+          import json
+          import sys
+
+          model, text_path, tool_path = sys.argv[1:]
+          with open(text_path, "w", encoding="utf-8") as handle:
+              json.dump({
+                  "model": model,
+                  "max_tokens": 32,
+                  "stream": True,
+                  "messages": [{"role": "user", "content": "Reply briefly with OK."}],
+              }, handle)
+
+          with open(tool_path, "w", encoding="utf-8") as handle:
+              json.dump({
+                  "model": model,
+                  "max_tokens": 96,
+                  "stream": True,
+                  "tools": [{
+                      "name": "get_probe_value",
+                      "description": "Return a deterministic probe value supplied by the client.",
+                      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+                  }],
+                  "tool_choice": {"type": "tool", "name": "get_probe_value", "disable_parallel_tool_use": True},
+                  "messages": [{"role": "user", "content": "Call get_probe_value exactly once."}],
+              }, handle)
+          PY
+
+          text_status="$(curl --silent --show-error --no-buffer \
+            --max-time 120 \
+            --dump-header "$text_headers" \
+            --output "$text_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/messages' \
+            --header 'Content-Type: application/json' \
+            --header 'anthropic-version: 2023-06-01' \
+            --data-binary "@$text_request")"
+          echo "agentinterposer_messages_stream_text_http=${text_status}"
+          if [[ ! "$text_status" =~ ^2 ]]; then
+            echo 'AgentInterposer Messages text streaming probe failed.' >&2
+            exit 1
+          fi
+
+          python3 - "$text_headers" "$text_response" <<'PY'
+          import json
+          import sys
+
+          headers_path, response_path = sys.argv[1:]
+          headers = open(headers_path, encoding="utf-8", errors="replace").read().lower()
+          if "content-type: text/event-stream" not in headers:
+              raise SystemExit("Messages text stream did not return text/event-stream")
+
+          def events(path):
+              result = []
+              name = None
+              data = []
+              for raw in open(path, encoding="utf-8"):
+                  line = raw.rstrip("\r\n")
+                  if not line:
+                      if name and data:
+                          result.append((name, json.loads("\n".join(data))))
+                      name, data = None, []
+                      continue
+                  if line.startswith("event: "):
+                      name = line[7:]
+                  elif line.startswith("data: "):
+                      data.append(line[6:])
+              if name and data:
+                  result.append((name, json.loads("\n".join(data))))
+              return result
+
+          stream = events(response_path)
+          names = [name for name, _ in stream]
+          if not names or names[0] != "message_start" or names[-1] != "message_stop":
+              raise SystemExit("Messages text stream has an invalid envelope")
+          text_deltas = [data for name, data in stream if name == "content_block_delta" and data.get("delta", {}).get("type") == "text_delta"]
+          if not text_deltas or not any(isinstance(item.get("delta", {}).get("text"), str) and item["delta"]["text"] for item in text_deltas):
+              raise SystemExit("Messages text stream contains no non-empty text_delta")
+          message_delta = next((data for name, data in reversed(stream) if name == "message_delta"), None)
+          if not message_delta or message_delta.get("delta", {}).get("stop_reason") not in {"end_turn", "max_tokens"}:
+              raise SystemExit("Messages text stream has an invalid terminal stop_reason")
+          usage = message_delta.get("usage")
+          if not isinstance(usage, dict) or not isinstance(usage.get("input_tokens"), int) or usage["input_tokens"] <= 0 or not isinstance(usage.get("output_tokens"), int) or usage["output_tokens"] <= 0:
+              raise SystemExit("Messages text stream did not receive terminal upstream usage")
+          print("agentinterposer_messages_stream_text_schema=ok")
+          print("agentinterposer_messages_stream_usage=ok")
+          PY
+
+          tool_status="$(curl --silent --show-error --no-buffer \
+            --max-time 120 \
+            --dump-header "$tool_headers" \
+            --output "$tool_response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/messages' \
+            --header 'Content-Type: application/json' \
+            --header 'anthropic-version: 2023-06-01' \
+            --data-binary "@$tool_request")"
+          echo "agentinterposer_messages_stream_tool_http=${tool_status}"
+          if [[ ! "$tool_status" =~ ^2 ]]; then
+            echo 'AgentInterposer Messages tool streaming probe failed.' >&2
+            exit 1
+          fi
+
+          python3 - "$tool_headers" "$tool_response" <<'PY'
+          import json
+          import sys
+
+          headers_path, response_path = sys.argv[1:]
+          headers = open(headers_path, encoding="utf-8", errors="replace").read().lower()
+          if "content-type: text/event-stream" not in headers:
+              raise SystemExit("Messages tool stream did not return text/event-stream")
+
+          stream = []
+          name = None
+          data = []
+          for raw in open(response_path, encoding="utf-8"):
+              line = raw.rstrip("\r\n")
+              if not line:
+                  if name and data:
+                      stream.append((name, json.loads("\n".join(data))))
+                  name, data = None, []
+                  continue
+              if line.startswith("event: "):
+                  name = line[7:]
+              elif line.startswith("data: "):
+                  data.append(line[6:])
+          if name and data:
+              stream.append((name, json.loads("\n".join(data))))
+
+          starts = [(data.get("index"), data.get("content_block")) for name, data in stream if name == "content_block_start"]
+          tool_start = next(((index, block) for index, block in starts if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "get_probe_value"), None)
+          if not tool_start:
+              raise SystemExit("Messages tool stream contains no get_probe_value tool_use block")
+          tool_index, tool_block = tool_start
+          if not isinstance(tool_block.get("id"), str) or not tool_block["id"] or tool_block.get("input") != {}:
+              raise SystemExit("Messages tool stream has an invalid tool_use start block")
+          partials = [data.get("delta", {}).get("partial_json", "") for name, data in stream if name == "content_block_delta" and data.get("index") == tool_index and data.get("delta", {}).get("type") == "input_json_delta"]
+          if not partials:
+              raise SystemExit("Messages tool stream contains no input_json_delta")
+          parsed = json.loads("".join(partials))
+          if not isinstance(parsed, dict):
+              raise SystemExit("Messages tool stream input_json_delta did not form an object")
+          message_delta = next((data for name, data in reversed(stream) if name == "message_delta"), None)
+          if not message_delta or message_delta.get("delta", {}).get("stop_reason") != "tool_use":
+              raise SystemExit("Messages tool stream did not stop for tool_use")
+          if not stream or stream[-1][0] != "message_stop":
+              raise SystemExit("Messages tool stream did not terminate with message_stop")
+          print("agentinterposer_messages_stream_tool_use=ok")
+          print("agentinterposer_messages_stream_tool_json=ok")
+          PY
+          echo 'messages_stream_verified=true' >> "$GITHUB_OUTPUT"
+
       - name: Probe Codex Responses tool round trip
         if: ${{ inputs.scope == 'codex' }}
         id: codex
@@ -792,6 +994,8 @@ jobs:
           GATEWAY_OUTCOME: ${{ steps.gateway.outcome }}
           MESSAGES_GATEWAY_OUTCOME: ${{ steps.messages_gateway.outcome }}
           MESSAGES_ADAPTER_VERIFIED: ${{ steps.messages_gateway.outputs.messages_adapter_verified }}
+          MESSAGES_STREAM_OUTCOME: ${{ steps.messages_stream_gateway.outcome }}
+          MESSAGES_STREAM_VERIFIED: ${{ steps.messages_stream_gateway.outputs.messages_stream_verified }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
         run: |
@@ -808,6 +1012,9 @@ jobs:
             elif [ "$SCOPE" = 'messages' ]; then
               echo "- AgentInterposer Messages adapter step: ${MESSAGES_GATEWAY_OUTCOME:-not-run}"
               echo "- Messages text + tool round trip: ${MESSAGES_ADAPTER_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'messages-stream' ]; then
+              echo "- AgentInterposer Messages streaming step: ${MESSAGES_STREAM_OUTCOME:-not-run}"
+              echo "- Messages text + tool SSE: ${MESSAGES_STREAM_VERIFIED:-not-verified}"
             else
               echo "- Chat Completions step: ${CHAT_OUTCOME:-not-run}"
               echo "- Responses API: ${RESPONSES_SUPPORTED:-unknown}"
