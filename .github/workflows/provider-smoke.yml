@@ -715,11 +715,10 @@ jobs:
           claude_stderr="$RUNNER_TEMP/claude-code-stderr.log"
           claude_user='agentinterposer-claude'
           claude_home='/tmp/agentinterposer-claude-home'
-          proof_file='/tmp/agentinterposer-claude-proof.txt'
           pid=''
 
           cleanup() {
-            rm -f "$proof_file" "$claude_output" "$claude_stderr"
+            rm -f "$claude_output" "$claude_stderr"
             if [ -n "$pid" ]; then
               kill "$pid" 2>/dev/null || true
               wait "$pid" 2>/dev/null || true
@@ -752,8 +751,6 @@ jobs:
 
           sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
           sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
-          rm -f "$proof_file"
-
           shell_pid=$$
           if sudo -u "$claude_user" sh -c "cat /proc/$shell_pid/environ >/dev/null 2>&1"; then
             echo 'Claude Code isolation failed: runner environment is readable.' >&2
@@ -774,7 +771,7 @@ jobs:
           echo 'claude_code_os_user_isolation=ok'
           echo 'claude_code_secret_environment_isolation=ok'
 
-          prompt=$'Use Bash exactly once. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\ncat /proc/sys/kernel/random/uuid | tee -a /tmp/agentinterposer-claude-proof.txt\nEND_COMMAND\nAfter the command completes, reply with exactly the UUID from stdout and no other text.'
+          prompt=$'Use Bash exactly once. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\ncat /proc/sys/kernel/random/uuid\nEND_COMMAND\nAfter the command completes, reply with exactly the UUID from stdout and no other text.'
           set +e
           (
             cd "$claude_home/work"
@@ -797,22 +794,16 @@ jobs:
               --no-session-persistence \
               --tools 'Bash' \
               --permission-mode dontAsk \
-              --allowedTools 'Bash(cat /proc/sys/kernel/random/uuid | tee -a /tmp/agentinterposer-claude-proof.txt)' \
+              --allowedTools 'Bash(cat /proc/sys/kernel/random/uuid)' \
               --max-turns 3 \
-              --output-format json \
+              --output-format stream-json \
+              --verbose \
               >"$claude_output" 2>"$claude_stderr"
           )
           claude_exit=$?
           set -e
           echo "claude_code_exit=${claude_exit}"
           if [ "$claude_exit" -ne 0 ]; then
-            if [ -f "$proof_file" ]; then
-              echo 'claude_code_proof_file_present=true'
-              echo "claude_code_proof_line_count=$(wc -l < "$proof_file")"
-            else
-              echo 'claude_code_proof_file_present=false'
-              echo 'claude_code_proof_line_count=0'
-            fi
             python3 - "$claude_output" "$claude_stderr" <<'PY'
           import json
           import os
@@ -825,64 +816,59 @@ jobs:
               text = text.lower()
               labels = []
               for needle, label in [
-                  ("permission", "permission"),
-                  ("denied", "permission"),
-                  ("invalid_request", "invalid-request"),
-                  ("invalid request", "invalid-request"),
-                  ("cache_control", "cache-control"),
-                  ("metadata", "metadata"),
-                  ("tool_result", "tool-result"),
-                  ("tool result", "tool-result"),
-                  ("tool_use", "tool-use"),
-                  ("tool use", "tool-use"),
-                  ("rate limit", "rate-limit"),
-                  ("rate_limit", "rate-limit"),
-                  ("overloaded", "overloaded"),
-                  ("server error", "server-error"),
-                  ("api error", "api-error"),
-                  ("authentication", "auth"),
-                  ("unauthorized", "auth"),
-                  ("model", "model"),
-                  ("connection", "connection"),
-                  ("timeout", "timeout"),
-                  ("max turns", "max-turns"),
-                  ("max_turns", "max-turns"),
+                  ("permission", "permission"), ("denied", "permission"),
+                  ("invalid_request", "invalid-request"), ("invalid request", "invalid-request"),
+                  ("cache_control", "cache-control"), ("metadata", "metadata"),
+                  ("tool_result", "tool-result"), ("tool result", "tool-result"),
+                  ("tool_use", "tool-use"), ("tool use", "tool-use"),
+                  ("rate limit", "rate-limit"), ("rate_limit", "rate-limit"),
+                  ("overloaded", "overloaded"), ("server error", "server-error"),
+                  ("api error", "api-error"), ("authentication", "auth"),
+                  ("unauthorized", "auth"), ("model", "model"),
+                  ("connection", "connection"), ("timeout", "timeout"),
+                  ("max turns", "max-turns"), ("max_turns", "max-turns"),
               ]:
                   if needle in text and label not in labels:
                       labels.append(label)
               return labels
 
+          events = []
           if os.path.getsize(output_path):
-              try:
-                  data = json.load(open(output_path, encoding="utf-8"))
-              except Exception:
-                  print("claude_code_output=non-json")
-              else:
-                  print("claude_code_output_keys=" + ",".join(sorted(data)))
-                  print("claude_code_subtype=" + str(data.get("subtype", "unknown")))
-                  print("claude_code_is_error=" + str(bool(data.get("is_error"))).lower())
-                  print("claude_code_num_turns=" + str(data.get("num_turns", "unknown")))
-                  print("claude_code_api_error_status=" + str(data.get("api_error_status", "none")))
-                  print("claude_code_terminal_reason=" + str(data.get("terminal_reason", "none")))
-
-                  denials = data.get("permission_denials")
-                  if not isinstance(denials, list):
-                      denials = []
-                  print("claude_code_permission_denials_count=" + str(len(denials)))
-                  tool_names = []
-                  for denial in denials:
-                      if not isinstance(denial, dict):
-                          continue
-                      name = denial.get("tool_name") or denial.get("name")
-                      if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", name) and name not in tool_names:
-                          tool_names.append(name)
-                  print("claude_code_permission_denied_tools=" + (",".join(tool_names) if tool_names else "none"))
-
-                  error_text = " " .join(str(item) for item in data.get("errors", []) if isinstance(item, str))
-                  result_text = data.get("result") if isinstance(data.get("result"), str) else ""
-                  classes = classify(error_text + " " + result_text)
-                  print("claude_code_output_error_classes=" + (",".join(classes) if classes else "other"))
-
+              for raw in open(output_path, encoding="utf-8", errors="replace"):
+                  raw = raw.strip()
+                  if not raw:
+                      continue
+                  try:
+                      value = json.loads(raw)
+                  except Exception:
+                      continue
+                  if isinstance(value, dict):
+                      events.append(value)
+          print("claude_code_event_count=" + str(len(events)))
+          print("claude_code_event_types=" + ",".join(sorted({str(e.get("type", "unknown")) for e in events})))
+          result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+          if result is not None:
+              print("claude_code_subtype=" + str(result.get("subtype", "unknown")))
+              print("claude_code_is_error=" + str(bool(result.get("is_error"))).lower())
+              print("claude_code_num_turns=" + str(result.get("num_turns", "unknown")))
+              print("claude_code_api_error_status=" + str(result.get("api_error_status", "none")))
+              print("claude_code_terminal_reason=" + str(result.get("terminal_reason", "none")))
+              denials = result.get("permission_denials")
+              if not isinstance(denials, list):
+                  denials = []
+              print("claude_code_permission_denials_count=" + str(len(denials)))
+              tool_names = []
+              for denial in denials:
+                  if not isinstance(denial, dict):
+                      continue
+                  name = denial.get("tool_name") or denial.get("name")
+                  if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", name) and name not in tool_names:
+                      tool_names.append(name)
+              print("claude_code_permission_denied_tools=" + (",".join(tool_names) if tool_names else "none"))
+              error_text = " ".join(str(item) for item in result.get("errors", []) if isinstance(item, str))
+              result_text = result.get("result") if isinstance(result.get("result"), str) else ""
+              classes = classify(error_text + " " + result_text)
+              print("claude_code_output_error_classes=" + (",".join(classes) if classes else "other"))
           if os.path.getsize(stderr_path):
               text = open(stderr_path, encoding="utf-8", errors="replace").read()
               classes = classify(text)
@@ -891,33 +877,83 @@ jobs:
             exit 1
           fi
 
-          if [ ! -f "$proof_file" ]; then
-            echo 'Claude Code did not execute the required Bash proof command.' >&2
-            exit 1
-          fi
-          if [ "$(wc -l < "$proof_file")" -ne 1 ]; then
-            echo 'Claude Code executed the proof command an unexpected number of times.' >&2
-            exit 1
-          fi
-
-          python3 - "$proof_file" "$claude_output" <<'PY'
+          python3 - "$claude_output" <<'PY'
           import json
           import re
           import sys
 
-          proof_path, output_path = sys.argv[1:]
-          proof = open(proof_path, encoding="utf-8").read().strip()
-          if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", proof, re.I):
-              raise SystemExit("Claude Code Bash proof output is not a UUIDv4")
-          data = json.load(open(output_path, encoding="utf-8"))
-          if data.get("is_error"):
-              raise SystemExit("Claude Code reported an error result")
-          turns = data.get("num_turns")
+          output_path = sys.argv[1]
+          events = []
+          for raw in open(output_path, encoding="utf-8", errors="strict"):
+              raw = raw.strip()
+              if not raw:
+                  continue
+              value = json.loads(raw)
+              if isinstance(value, dict):
+                  events.append(value)
+
+          def walk(value):
+              if isinstance(value, dict):
+                  yield value
+                  for child in value.values():
+                      yield from walk(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      yield from walk(child)
+
+          command = "cat /proc/sys/kernel/random/uuid"
+          tool_uses = []
+          tool_results = []
+          for event in events:
+              for obj in walk(event):
+                  if obj.get("type") == "tool_use" and obj.get("name") == "Bash":
+                      tool_uses.append(obj)
+                  elif obj.get("type") == "tool_result":
+                      tool_results.append(obj)
+
+          matching_uses = [
+              obj for obj in tool_uses
+              if isinstance(obj.get("input"), dict) and obj["input"].get("command") == command
+          ]
+          if len(matching_uses) != 1:
+              raise SystemExit("Claude Code did not emit exactly one approved Bash tool_use")
+          tool_use_id = matching_uses[0].get("id")
+          if not isinstance(tool_use_id, str) or not tool_use_id:
+              raise SystemExit("Claude Code Bash tool_use has no id")
+
+          matching_results = [obj for obj in tool_results if obj.get("tool_use_id") == tool_use_id]
+          if len(matching_results) != 1:
+              raise SystemExit("Claude Code did not emit exactly one matching tool_result")
+          if matching_results[0].get("is_error") is True:
+              raise SystemExit("Claude Code Bash tool_result reported an error")
+
+          def text_content(value):
+              if isinstance(value, str):
+                  return value
+              if isinstance(value, list):
+                  parts = []
+                  for block in value:
+                      if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                          parts.append(block["text"])
+                  return "\n".join(parts)
+              return ""
+
+          tool_text = text_content(matching_results[0].get("content"))
+          uuids = re.findall(r"\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", tool_text, re.I)
+          if len(uuids) != 1:
+              raise SystemExit("Claude Code Bash tool_result did not contain exactly one UUIDv4")
+          proof = uuids[0]
+
+          result = next((event for event in reversed(events) if event.get("type") == "result"), None)
+          if result is None or result.get("subtype") != "success" or result.get("is_error"):
+              raise SystemExit("Claude Code did not finish with a successful result event")
+          turns = result.get("num_turns")
           if not isinstance(turns, int) or turns < 2 or turns > 3:
               raise SystemExit("Claude Code completed with an unexpected turn count")
-          result = data.get("result")
-          if not isinstance(result, str) or proof not in result:
-              raise SystemExit("Claude Code final response did not preserve the Bash proof output")
+          final_text = result.get("result")
+          if not isinstance(final_text, str) or proof not in final_text:
+              raise SystemExit("Claude Code final response did not preserve the Bash tool_result UUID")
+
           print("claude_code_bash_tool=ok")
           print("claude_code_tool_result_round_trip=ok")
           print("claude_code_messages_streaming=ok")
