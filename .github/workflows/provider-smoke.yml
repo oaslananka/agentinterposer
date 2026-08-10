@@ -426,10 +426,12 @@ jobs:
           capture_pid=''
           capture_gateway_pid=''
           buffer_pid=''
+          gateway_replay_pid=''
+          gateway_replay_upstream_pid=''
 
           cleanup() {
             rm -f "$proof_file"
-            for child in "$buffer_pid" "$capture_gateway_pid" "$capture_pid" "$pid"; do
+            for child in "$gateway_replay_pid" "$gateway_replay_upstream_pid" "$buffer_pid" "$capture_gateway_pid" "$capture_pid" "$pid"; do
               if [ -n "$child" ]; then
                 kill "$child" 2>/dev/null || true
                 wait "$child" 2>/dev/null || true
@@ -1024,6 +1026,169 @@ jobs:
           print("codex_replay_second_request=true")
           print("codex_replay_function_call_output=true")
           PYREPLAYCHECK
+
+          gateway_replay_home="$RUNNER_TEMP/codex-gateway-replay-home"
+          gateway_replay_ready="$RUNNER_TEMP/codex-gateway-replay-ready"
+          gateway_replay_upstream_ready="$RUNNER_TEMP/codex-gateway-replay-upstream-ready"
+          gateway_replay_first_request="$RUNNER_TEMP/codex-gateway-replay-request-1.json"
+          gateway_replay_second_request="$RUNNER_TEMP/codex-gateway-replay-request-2.json"
+          gateway_replay_jsonl="$RUNNER_TEMP/codex-gateway-replay-events.jsonl"
+          gateway_replay_stderr="$RUNNER_TEMP/codex-gateway-replay-stderr.log"
+          gateway_replay_log="$RUNNER_TEMP/codex-gateway-replay.log"
+          mkdir -p "$gateway_replay_home"
+
+          python3 - "$codex_home/config.toml" "$gateway_replay_home/config.toml" <<'PYGWCFG'
+          import sys
+
+          source, target = sys.argv[1], sys.argv[2]
+          text = open(source, encoding="utf-8").read()
+          text = text.replace('name = "AgentInterposer certification"', 'name = "AgentInterposer SSE replay diagnostic"')
+          text = text.replace('base_url = "http://127.0.0.1:11435/v1"', 'base_url = "http://127.0.0.1:11439/v1"')
+          text = text.replace('env_key = "AGENTINTERPOSER_CLIENT_KEY"', 'env_key = "GATEWAY_REPLAY_CLIENT_KEY"')
+          with open(target, "w", encoding="utf-8") as handle:
+              handle.write(text)
+          PYGWCFG
+
+          python3 - "$exact_response" "$gateway_replay_upstream_ready" "$gateway_replay_first_request" "$gateway_replay_second_request" <<'PYGWUP' &
+          import http.server
+          import pathlib
+          import sys
+
+          response_path, ready_path, first_path, second_path = map(pathlib.Path, sys.argv[1:])
+          response_bytes = response_path.read_bytes()
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              count = 0
+
+              def log_message(self, _format, *_args):
+                  return
+
+              def do_POST(self):
+                  length = int(self.headers.get("Content-Length", "0"))
+                  body = self.rfile.read(length)
+                  type(self).count += 1
+                  if type(self).count == 1:
+                      first_path.write_bytes(body)
+                      self.send_response(200)
+                      self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                      self.send_header("Cache-Control", "no-cache")
+                      self.send_header("Content-Length", str(len(response_bytes)))
+                      self.end_headers()
+                      self.wfile.write(response_bytes)
+                      self.wfile.flush()
+                      return
+                  second_path.write_bytes(body)
+                  payload = b'{"error":{"message":"gateway replay diagnostic complete"}}\n'
+                  self.send_response(500)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(payload)))
+                  self.end_headers()
+                  self.wfile.write(payload)
+
+          server = http.server.ThreadingHTTPServer(("127.0.0.1", 11440), Handler)
+          ready_path.write_text("ready", encoding="utf-8")
+          server.serve_forever()
+          PYGWUP
+          gateway_replay_upstream_pid=$!
+
+          for _ in {1..50}; do
+            if [ -s "$gateway_replay_upstream_ready" ]; then
+              break
+            fi
+            sleep 0.1
+          done
+          if [ ! -s "$gateway_replay_upstream_ready" ]; then
+            echo 'Gateway replay upstream did not become ready.' >&2
+            exit 1
+          fi
+
+          AGENTINTERPOSER_ADDR='127.0.0.1:11439' \
+            AGENTINTERPOSER_UPSTREAM_URL='http://127.0.0.1:11440' \
+            AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN='local-replay-upstream-placeholder' \
+            AGENTINTERPOSER_MAX_RETRIES='0' \
+            "$binary" >"$gateway_replay_log" 2>&1 &
+          gateway_replay_pid=$!
+
+          for _ in {1..50}; do
+            if curl --silent --fail 'http://127.0.0.1:11439/healthz' >/dev/null; then
+              printf 'ready' > "$gateway_replay_ready"
+              break
+            fi
+            sleep 0.1
+          done
+          if [ ! -s "$gateway_replay_ready" ]; then
+            echo 'Gateway replay AgentInterposer did not become ready.' >&2
+            exit 1
+          fi
+
+          set +e
+          timeout --signal=TERM --kill-after=5s 45s \
+            env CODEX_HOME="$gateway_replay_home" \
+            GATEWAY_REPLAY_CLIENT_KEY='local-replay-client-placeholder' \
+            "$codex" exec \
+              --ephemeral \
+              --sandbox read-only \
+              --ignore-rules \
+              --json \
+              "$prompt" >"$gateway_replay_jsonl" 2>"$gateway_replay_stderr"
+          gateway_replay_status=$?
+          set -e
+
+          kill "$gateway_replay_pid" "$gateway_replay_upstream_pid" 2>/dev/null || true
+          wait "$gateway_replay_pid" 2>/dev/null || true
+          wait "$gateway_replay_upstream_pid" 2>/dev/null || true
+          gateway_replay_pid=''
+          gateway_replay_upstream_pid=''
+          echo "codex_gateway_replay_exit=${gateway_replay_status}"
+
+          python3 - "$exact_response" "$gateway_replay_second_request" "$gateway_replay_jsonl" <<'PYGWCHECK'
+          import json
+          import pathlib
+          import sys
+
+          response_path, second_path, jsonl_path = map(pathlib.Path, sys.argv[1:])
+          if not second_path.is_file():
+              raise SystemExit("Codex sent no second request through AgentInterposer after replayed NVIDIA SSE")
+
+          call_id = None
+          for raw in response_path.read_text(encoding="utf-8").splitlines():
+              if not raw.startswith("data:"):
+                  continue
+              value = raw.split(":", 1)[1].strip()
+              if value == "[DONE]":
+                  continue
+              try:
+                  event = json.loads(value)
+              except Exception:
+                  continue
+              if event.get("type") != "response.output_item.done":
+                  continue
+              item = event.get("item")
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  call_id = item.get("call_id")
+                  break
+          if not isinstance(call_id, str) or not call_id:
+              raise SystemExit("Gateway replay source contained no completed function_call")
+
+          second = json.loads(second_path.read_text(encoding="utf-8"))
+          inputs = second.get("input") or []
+          outputs = [item for item in inputs if isinstance(item, dict) and item.get("type") == "function_call_output"]
+          if not any(item.get("call_id") == call_id for item in outputs):
+              raise SystemExit("AgentInterposer replay function_call_output did not match the NVIDIA call_id")
+
+          counts = {}
+          if jsonl_path.is_file():
+              for raw in jsonl_path.read_text(encoding="utf-8").splitlines():
+                  try:
+                      event = json.loads(raw)
+                  except Exception:
+                      continue
+                  event_type = str(event.get("type") or "unknown")
+                  counts[event_type] = counts.get(event_type, 0) + 1
+          print("codex_gateway_replay_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)))
+          print("codex_gateway_replay_second_request=true")
+          print("codex_gateway_replay_function_call_output=true")
+          PYGWCHECK
 
           framed_home="$RUNNER_TEMP/codex-framed-home"
           framed_ready="$RUNNER_TEMP/codex-framed-ready"
