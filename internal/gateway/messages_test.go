@@ -235,21 +235,10 @@ func TestHandlerRejectsStreamingAnthropicMessagesBeforeUpstream(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer upstream.Close()
-
-	handler, err := NewHandler(Config{
-		UpstreamURL:         upstream.URL,
-		UpstreamBearerToken: "server-secret",
-		MaxConcurrent:       1,
-		MaxRequestBytes:     1 << 20,
-	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	response := httptest.NewRecorder()
@@ -291,21 +280,10 @@ func TestHandlerRejectsUnsupportedAnthropicContentBlockBeforeUpstream(t *testing
 	t.Parallel()
 
 	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer upstream.Close()
-
-	handler, err := NewHandler(Config{
-		UpstreamURL:         upstream.URL,
-		UpstreamBearerToken: "server-secret",
-		MaxConcurrent:       1,
-		MaxRequestBytes:     1 << 20,
-	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`))
 	response := httptest.NewRecorder()
@@ -410,4 +388,21 @@ func TestHandlerTranslatesUpstreamRateLimitToAnthropicError(t *testing.T) {
 	if body.Type != "error" || body.Error.Type != "rate_limit_error" || body.Error.Message != "provider busy" {
 		t.Fatalf("error body = %#v", body)
 	}
+}
+
+func newMessagesTestHandler(t *testing.T, upstreamHandler http.Handler) http.Handler {
+	t.Helper()
+
+	upstream := httptest.NewServer(upstreamHandler)
+	t.Cleanup(upstream.Close)
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	return handler
 }
