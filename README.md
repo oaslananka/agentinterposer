@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions and native Responses passthrough paths. Anthropic Messages compatibility remains a separate, test-driven adapter rather than being claimed before it is verified.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions and native Responses passthrough paths. A manual compatibility probe now verifies Codex CLI `0.147.0` with `nvidia/nemotron-3-super-120b-a12b` for a real Responses shell-tool round trip through AgentInterposer. This is a narrow certification profile, not a claim of universal Codex or model compatibility. Anthropic Messages compatibility remains a separate, test-driven adapter rather than being claimed before it is verified.
 
 ## Why AgentInterposer?
 
@@ -28,6 +28,7 @@ The first vertical slice supports:
 - bounded upstream concurrency (default: `3`)
 - exponential retry for `429`, `500`, `502`, `503`, and `504` responses
 - incremental flushing for `text/event-stream` responses
+- manual Codex CLI `0.147.0` certification for a Responses shell-tool round trip with `nvidia/nemotron-3-super-120b-a12b`
 - configurable request-size protection (default: `32 MiB`)
 - safe loopback binding by default (`127.0.0.1:11435`)
 
@@ -113,7 +114,7 @@ curl http://127.0.0.1:11435/v1/responses \
   }'
 ```
 
-This establishes the transport needed by Responses-based clients. Full Codex compatibility still requires streaming, function-call, and agent-behavior certification before the project claims it.
+This establishes the transport needed by Responses-based clients. The manual `Provider Smoke` workflow can also run the current `scope=codex` certification path: Codex CLI `0.147.0` -> AgentInterposer -> NVIDIA hosted Responses -> shell function call -> tool output -> final response. Other Codex versions, models, tool surfaces, and longer agent loops remain uncertified.
 
 ## Configuration
 
@@ -134,7 +135,7 @@ For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_
 
 Near-term work is intentionally compatibility-first:
 
-1. Codex/Responses streaming and function-call compatibility certification on the native passthrough path.
+1. Broaden Codex/Responses certification beyond the current single-shell-tool Nemotron 3 Super profile to additional tools, agent loops, Codex versions, and models.
 2. Anthropic Messages (`/v1/messages`) adapter for Claude-style clients when upstreams do not expose it.
 3. Streaming tool-call and reasoning normalization tests.
 4. Model capability profiles and compatibility certification tests.

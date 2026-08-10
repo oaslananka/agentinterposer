@@ -8,6 +8,15 @@ on:
         required: true
         default: nvidia/nemotron-3-super-120b-a12b
         type: string
+      scope:
+        description: Smoke scope
+        required: true
+        default: full
+        type: choice
+        options:
+          - baseline
+          - full
+          - codex
 
 permissions:
   contents: read
@@ -16,7 +25,7 @@ jobs:
   nvidia-hosted:
     name: nvidia-hosted
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Validate Doppler bootstrap token
@@ -50,6 +59,8 @@ jobs:
 
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -57,6 +68,8 @@ jobs:
           go-version-file: go.mod
 
       - name: Probe Chat Completions
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'baseline' }}
+        id: chat
         shell: bash
         env:
           NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
@@ -67,6 +80,7 @@ jobs:
           trap 'rm -f "$body"' EXIT
 
           status="$(curl --silent --show-error \
+            --max-time 120 \
             --output "$body" \
             --write-out '%{http_code}' \
             --request POST \
@@ -102,6 +116,7 @@ jobs:
           PY
 
       - name: Probe Responses API
+        if: ${{ inputs.scope == 'full' }}
         id: responses
         shell: bash
         env:
@@ -113,6 +128,7 @@ jobs:
           trap 'rm -f "$body"' EXIT
 
           status="$(curl --silent --show-error \
+            --max-time 120 \
             --output "$body" \
             --write-out '%{http_code}' \
             --request POST \
@@ -149,6 +165,7 @@ jobs:
           fi
 
       - name: Probe Anthropic Messages API
+        if: ${{ inputs.scope == 'full' }}
         id: messages
         shell: bash
         env:
@@ -160,6 +177,7 @@ jobs:
           trap 'rm -f "$body"' EXIT
 
           status="$(curl --silent --show-error \
+            --max-time 120 \
             --output "$body" \
             --write-out '%{http_code}' \
             --request POST \
@@ -197,6 +215,8 @@ jobs:
           fi
 
       - name: Probe AgentInterposer Responses passthrough
+        if: ${{ inputs.scope == 'full' }}
+        id: gateway
         shell: bash
         env:
           NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
@@ -238,6 +258,7 @@ jobs:
           fi
 
           status="$(curl --silent --show-error \
+            --max-time 120 \
             --output "$body" \
             --write-out '%{http_code}' \
             --request POST \
@@ -259,19 +280,343 @@ jobs:
           print("agentinterposer_responses_schema=ok")
           PY
 
+      - name: Probe Codex Responses tool round trip
+        if: ${{ inputs.scope == 'codex' }}
+        id: codex
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          if [ "$MODEL" != 'nvidia/nemotron-3-super-120b-a12b' ]; then
+            echo 'Codex certification is currently defined only for nvidia/nemotron-3-super-120b-a12b.' >&2
+            exit 2
+          fi
+          codex_user='agentinterposer-codex'
+          codex_root="/tmp/agentinterposer-codex-cli-${GITHUB_RUN_ID}"
+          codex_home="/tmp/agentinterposer-codex-home-${GITHUB_RUN_ID}"
+          codex_run_dir="/tmp/agentinterposer-codex-run-${GITHUB_RUN_ID}"
+          binary="$RUNNER_TEMP/agentinterposer-codex"
+          gateway_log="$RUNNER_TEMP/agentinterposer-codex.log"
+          codex_jsonl="$codex_run_dir/codex-events.jsonl"
+          codex_stderr="$codex_run_dir/codex-stderr.log"
+          final_message="$codex_run_dir/codex-final.txt"
+          model_catalog="$codex_home/codex-model-catalog.json"
+          pid=''
+          codex_user_created=false
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+
+          cleanup() {
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+            if [ "$codex_user_created" = true ]; then
+              sudo userdel "$codex_user" 2>/dev/null || true
+            fi
+            sudo rm -rf "$codex_root" "$codex_home" "$codex_run_dir"
+          }
+          trap cleanup EXIT
+
+          if id "$codex_user" >/dev/null 2>&1; then
+            echo 'Dedicated Codex certification user unexpectedly already exists.' >&2
+            exit 1
+          fi
+          sudo useradd --system --home-dir "$codex_home" --shell /bin/bash "$codex_user"
+          codex_user_created=true
+          sudo install -d -m 0700 -o "$codex_user" -g "$codex_user" "$codex_home"
+          sudo install -d -m 0770 -o "$codex_user" -g "$runner_gid" "$codex_run_dir"
+          mkdir -p "$codex_root"
+          npm install --prefix "$codex_root" --no-audit --no-fund --silent '@openai/codex@0.147.0'
+          chmod -R a+rX "$codex_root"
+          codex="$codex_root/node_modules/.bin/codex"
+          codex_version="$($codex --version)"
+          if [ "$codex_version" != 'codex-cli 0.147.0' ]; then
+            echo "Unexpected Codex version: $codex_version" >&2
+            exit 1
+          fi
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$gateway_log" 2>&1 &
+          pid=$!
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for the Codex probe.' >&2
+            exit 1
+          fi
+
+          sudo -u "$codex_user" -- env -i PATH='/usr/bin:/bin' \
+            python3 - "$codex_home/config.toml" "$model_catalog" "$MODEL" <<'PY'
+          import json
+          import sys
+
+          config_path, catalog_path, model = sys.argv[1], sys.argv[2], sys.argv[3]
+          catalog = {
+              "models": [
+                  {
+                      "slug": model,
+                      "display_name": "NVIDIA Nemotron 3 Super",
+                      "description": "NVIDIA hosted tool-use model",
+                      "default_reasoning_level": None,
+                      "supported_reasoning_levels": [],
+                      "shell_type": "shell_command",
+                      "visibility": "none",
+                      "minimal_client_version": [0, 147, 0],
+                      "supported_in_api": True,
+                      "priority": 99,
+                      "upgrade": None,
+                      "model_messages": {
+                          "instructions_template": "You are a coding agent. Use available tools when needed and follow the user request.",
+                          "instructions_variables": None,
+                          "approvals": None,
+                          "collaboration_modes": None,
+                          "auto_review": None,
+                          "permissions": None,
+                      },
+                      "include_skills_usage_instructions": False,
+                      "include_plugin_usage_instructions": False,
+                      "include_apps_usage_instructions": False,
+                      "supports_reasoning_summary_parameter": False,
+                      "default_reasoning_summary": "none",
+                      "support_verbosity": False,
+                      "default_verbosity": None,
+                      "apply_patch_tool_type": None,
+                      "web_search_tool_type": "text",
+                      "truncation_policy": {"mode": "bytes", "limit": 10000},
+                      "supports_parallel_tool_calls": False,
+                      "supports_image_detail_original": False,
+                      "context_window": 1000000,
+                      "max_context_window": 1000000,
+                      "effective_context_window_percent": 95,
+                      "experimental_supported_tools": [],
+                      "input_modalities": ["text"],
+                      "supports_search_tool": False,
+                      "use_responses_lite": False,
+                  }
+              ]
+          }
+          with open(catalog_path, "w", encoding="utf-8") as handle:
+              json.dump(catalog, handle, separators=(",", ":"))
+
+          with open(config_path, "w", encoding="utf-8") as handle:
+              handle.write(f"model = {json.dumps(model)}\n")
+              handle.write('model_provider = "agentinterposer"\n')
+              handle.write('approval_policy = "never"\n')
+              handle.write('sandbox_mode = "read-only"\n')
+              handle.write('web_search = "disabled"\n')
+              handle.write('model_reasoning_summary = "none"\n')
+              handle.write(f"model_catalog_json = {json.dumps(catalog_path)}\n\n")
+              handle.write('[agents]\n')
+              handle.write('enabled = false\n\n')
+              handle.write('[features]\n')
+              handle.write('view_image = false\n')
+              handle.write('unified_exec = false\n\n')
+              handle.write('[tools.experimental_request_user_input]\n')
+              handle.write('enabled = false\n\n')
+              handle.write('[tools.update_plan]\n')
+              handle.write('enabled = false\n\n')
+              handle.write('[model_providers.agentinterposer]\n')
+              handle.write('name = "AgentInterposer certification"\n')
+              handle.write('base_url = "http://127.0.0.1:11435/v1"\n')
+              handle.write('env_key = "AGENTINTERPOSER_CLIENT_KEY"\n')
+              handle.write('wire_api = "responses"\n')
+              handle.write('request_max_retries = 0\n')
+              handle.write('stream_max_retries = 0\n')
+          PY
+
+          runner_shell_pid=$$
+          codex_uid="$(id -u "$codex_user")"
+          if [ "$runner_uid" = "$codex_uid" ]; then
+            echo 'Codex certification user is not UID-isolated from the runner.' >&2
+            exit 1
+          fi
+          for protected_pid in "$runner_shell_pid" "$pid"; do
+            if sudo -u "$codex_user" -- bash -c "exec 3<\"/proc/\$1/environ\"" bash "$protected_pid" 2>/dev/null; then
+              echo 'Codex certification user can read a protected runner process environment.' >&2
+              exit 1
+            fi
+          done
+
+          node_bin_dir="$(dirname "$(command -v node)")"
+          codex_env_names="$(sudo -u "$codex_user" -- env -i \
+            HOME="$codex_home" \
+            PATH="$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+            CODEX_HOME="$codex_home" \
+            AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
+            env | cut -d= -f1 | sort)"
+          for forbidden_name in NVIDIA_API_KEY DOPPLER_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN; do
+            if grep -qx "$forbidden_name" <<<"$codex_env_names"; then
+              echo "Forbidden credential environment name reached Codex: $forbidden_name" >&2
+              exit 1
+            fi
+          done
+          echo 'codex_os_user_isolation=ok'
+          echo 'codex_secret_environment_isolation=ok'
+          if sudo -u "$codex_user" -- sudo -n true >/dev/null 2>&1; then
+            echo 'Codex certification user unexpectedly has passwordless sudo.' >&2
+            exit 1
+          fi
+          echo 'codex_privilege_escalation_blocked=ok'
+          if sudo -u "$codex_user" -- git -C "$GITHUB_WORKSPACE" config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1; then
+            echo 'Checkout persisted a Git authorization header visible to Codex.' >&2
+            exit 1
+          fi
+          echo 'codex_git_credentials_not_persisted=ok'
+
+          isolated_version="$(sudo -u "$codex_user" -- env -i \
+            HOME="$codex_home" \
+            PATH="$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+            CODEX_HOME="$codex_home" \
+            AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
+            "$codex" --version)"
+          if [ "$isolated_version" != 'codex-cli 0.147.0' ]; then
+            echo 'Codex launcher failed under the isolated certification user.' >&2
+            exit 1
+          fi
+          echo 'codex_isolated_launcher=ok'
+
+          prompt='Run exactly one shell command. The executable must be cat and its only argument must be /proc/sys/kernel/random/uuid. Do not add another argument and do not run another command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the value.'
+          set +e
+          timeout --signal=TERM --kill-after=10s 180s \
+            sudo -u "$codex_user" -- bash -c "cd \"\$1\" && shift && exec env -i \"\$@\"" bash "$codex_run_dir" \
+              HOME="$codex_home" \
+              PATH="$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+              CODEX_HOME="$codex_home" \
+              AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
+              "$codex" exec \
+                --ephemeral \
+                --skip-git-repo-check \
+                --sandbox danger-full-access \
+                --ignore-rules \
+                --json \
+                --output-last-message "$final_message" \
+                "$prompt" >"$codex_jsonl" 2>"$codex_stderr"
+          codex_status=$?
+          set -e
+          sudo chown -R "$runner_uid:$runner_gid" "$codex_run_dir"
+
+          echo "codex_cli_version=$codex_version"
+          echo "codex_exit=$codex_status"
+          if [ "$codex_status" -ne 0 ]; then
+            echo 'Codex Responses tool round trip did not complete.' >&2
+          fi
+
+          set +e
+          python3 - "$codex_jsonl" "$final_message" <<'PY'
+          import json
+          import re
+          import sys
+
+          jsonl_path, final_path = sys.argv[1:]
+          counts = {}
+          item_counts = {}
+          command_results = []
+          successful_outputs = []
+          try:
+              lines = open(jsonl_path, encoding="utf-8")
+          except OSError:
+              lines = []
+          for raw in lines:
+              try:
+                  event = json.loads(raw)
+              except Exception:
+                  continue
+              event_type = str(event.get("type") or "unknown")
+              counts[event_type] = counts.get(event_type, 0) + 1
+              item = event.get("item")
+              if not isinstance(item, dict):
+                  continue
+              item_type = str(item.get("type") or "unknown")
+              item_counts[item_type] = item_counts.get(item_type, 0) + 1
+              if event_type != "item.completed" or item_type != "command_execution":
+                  continue
+              status = str(item.get("status") or "unknown")
+              exit_code = item.get("exit_code")
+              output = item.get("aggregated_output")
+              output_bytes = len(output.encode("utf-8")) if isinstance(output, str) else 0
+              command_results.append((status, exit_code, output_bytes))
+              if status == "completed" and exit_code == 0 and isinstance(output, str):
+                  successful_outputs.append(output)
+
+          print("codex_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)))
+          print("codex_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)))
+          for index, (status, exit_code, output_bytes) in enumerate(command_results, start=1):
+              print(f"codex_command_result_{index}=status:{status},exit:{exit_code},output_bytes:{output_bytes}")
+          print("codex_completed_command_count=" + str(len(command_results)))
+
+          if len(command_results) != 1 or len(successful_outputs) != 1:
+              raise SystemExit("Codex did not complete exactly one successful shell command")
+
+          uuid_pattern = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
+          match = uuid_pattern.search(successful_outputs[0])
+          tool_uuid = match.group(0) if match else None
+          print("codex_tool_output_uuid=" + str(tool_uuid is not None).lower())
+          if tool_uuid is None:
+              raise SystemExit("Successful shell command output contained no UUID proof")
+
+          try:
+              final = open(final_path, encoding="utf-8").read()
+          except OSError:
+              raise SystemExit("Codex produced no final response file")
+          contains = tool_uuid in final
+          print("codex_final_bytes=" + str(len(final.encode("utf-8"))))
+          print("codex_final_contains_tool_uuid=" + str(contains).lower())
+          if not contains:
+              raise SystemExit("Codex final response did not contain the shell command UUID proof")
+          PY
+          proof_check_status=$?
+          set -e
+
+          if [ "$codex_status" -ne 0 ]; then
+            exit "$codex_status"
+          fi
+          if [ "$proof_check_status" -ne 0 ]; then
+            exit "$proof_check_status"
+          fi
+
+          echo 'codex_responses_streaming=ok'
+          echo 'codex_function_call_round_trip=ok'
+          echo 'codex_verified=true' >> "$GITHUB_OUTPUT"
+
       - name: Write compatibility summary
+        if: ${{ always() }}
         shell: bash
         env:
           MODEL: ${{ inputs.model }}
+          SCOPE: ${{ inputs.scope }}
+          CHAT_OUTCOME: ${{ steps.chat.outcome }}
           RESPONSES_SUPPORTED: ${{ steps.responses.outputs.responses_supported }}
           MESSAGES_SUPPORTED: ${{ steps.messages.outputs.messages_supported }}
+          GATEWAY_OUTCOME: ${{ steps.gateway.outcome }}
+          CODEX_OUTCOME: ${{ steps.codex.outcome }}
+          CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
         run: |
           {
             echo '## NVIDIA hosted compatibility probe'
             echo
             echo "- Model: \`${MODEL}\`"
-            echo '- Chat Completions: supported (required for this workflow to pass)'
-            echo "- Responses API: ${RESPONSES_SUPPORTED:-unknown}"
-            echo "- Anthropic Messages API: ${MESSAGES_SUPPORTED:-unknown}"
-            echo '- AgentInterposer Responses passthrough: verified'
+            echo "- Scope: ${SCOPE}"
+            if [ "$SCOPE" = 'codex' ]; then
+              echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
+              echo "- Codex Responses tool round trip: ${CODEX_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'baseline' ]; then
+              echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
+            else
+              echo "- Chat Completions step: ${CHAT_OUTCOME:-not-run}"
+              echo "- Responses API: ${RESPONSES_SUPPORTED:-unknown}"
+              echo "- Anthropic Messages API: ${MESSAGES_SUPPORTED:-unknown}"
+              echo "- AgentInterposer Responses passthrough step: ${GATEWAY_OUTCOME:-not-run}"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
