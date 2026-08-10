@@ -1,0 +1,187 @@
+name: Provider Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: NVIDIA hosted model ID to probe
+        required: true
+        default: nvidia/nemotron-3-super-120b-a12b
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  nvidia-hosted:
+    name: nvidia-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Validate secret availability
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NVIDIA_API_KEY:-}" ]; then
+            echo "NVIDIA_API_KEY is not configured for this repository." >&2
+            exit 1
+          fi
+
+      - name: Probe Chat Completions
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          trap 'rm -f "$body"' EXIT
+
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'https://integrate.api.nvidia.com/v1/chat/completions' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "messages": [{"role": "user", "content": "Reply only with OK"}], "max_tokens": 16, "stream": False}))')")"
+
+          echo "chat_completions_http=${status}"
+          if [[ ! "$status" =~ ^2 ]]; then
+            python3 - "$body" <<'PY'
+          import json, sys
+          try:
+              data = json.load(open(sys.argv[1], encoding="utf-8"))
+          except Exception:
+              print("chat_completions_error=non-json-response")
+              raise SystemExit(0)
+          error = data.get("error")
+          if isinstance(error, dict):
+              print("chat_completions_error=" + str(error.get("message") or error.get("type") or "provider-error")[:240])
+          else:
+              print("chat_completions_error=" + str(data.get("detail") or data.get("title") or "provider-error")[:240])
+          PY
+            exit 1
+          fi
+
+          python3 - "$body" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          if not isinstance(data.get("choices"), list):
+              raise SystemExit("Chat Completions response is missing choices[]")
+          print("chat_completions_schema=ok")
+          PY
+
+      - name: Probe Responses API
+        id: responses
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          trap 'rm -f "$body"' EXIT
+
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'https://integrate.api.nvidia.com/v1/responses' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "input": "Reply only with OK", "max_output_tokens": 16, "stream": False}))')")"
+
+          echo "responses_http=${status}"
+          if [[ "$status" =~ ^2 ]]; then
+            python3 - "$body" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          if data.get("object") != "response" and not isinstance(data.get("output"), list):
+              raise SystemExit("Responses API returned an unexpected schema")
+          print("responses_schema=ok")
+          PY
+            echo "responses_supported=true" >> "$GITHUB_OUTPUT"
+          else
+            python3 - "$body" <<'PY'
+          import json, sys
+          try:
+              data = json.load(open(sys.argv[1], encoding="utf-8"))
+          except Exception:
+              print("responses_error=non-json-response")
+              raise SystemExit(0)
+          error = data.get("error")
+          if isinstance(error, dict):
+              print("responses_error=" + str(error.get("message") or error.get("type") or "provider-error")[:240])
+          else:
+              print("responses_error=" + str(data.get("detail") or data.get("title") or "provider-error")[:240])
+          PY
+            echo "responses_supported=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Probe Anthropic Messages API
+        id: messages
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          trap 'rm -f "$body"' EXIT
+
+          status="$(curl --silent --show-error \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'https://integrate.api.nvidia.com/v1/messages' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --header 'anthropic-version: 2023-06-01' \
+            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "messages": [{"role": "user", "content": "Reply only with OK"}], "max_tokens": 16, "stream": False}))')")"
+
+          echo "messages_http=${status}"
+          if [[ "$status" =~ ^2 ]]; then
+            python3 - "$body" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          if data.get("type") != "message" and not isinstance(data.get("content"), list):
+              raise SystemExit("Messages API returned an unexpected schema")
+          print("messages_schema=ok")
+          PY
+            echo "messages_supported=true" >> "$GITHUB_OUTPUT"
+          else
+            python3 - "$body" <<'PY'
+          import json, sys
+          try:
+              data = json.load(open(sys.argv[1], encoding="utf-8"))
+          except Exception:
+              print("messages_error=non-json-response")
+              raise SystemExit(0)
+          error = data.get("error")
+          if isinstance(error, dict):
+              print("messages_error=" + str(error.get("message") or error.get("type") or "provider-error")[:240])
+          else:
+              print("messages_error=" + str(data.get("detail") or data.get("title") or "provider-error")[:240])
+          PY
+            echo "messages_supported=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write compatibility summary
+        shell: bash
+        env:
+          MODEL: ${{ inputs.model }}
+          RESPONSES_SUPPORTED: ${{ steps.responses.outputs.responses_supported }}
+          MESSAGES_SUPPORTED: ${{ steps.messages.outputs.messages_supported }}
+        run: |
+          {
+            echo '## NVIDIA hosted compatibility probe'
+            echo
+            echo "- Model: \`${MODEL}\`"
+            echo '- Chat Completions: supported (required for this workflow to pass)'
+            echo "- Responses API: ${RESPONSES_SUPPORTED:-unknown}"
+            echo "- Anthropic Messages API: ${MESSAGES_SUPPORTED:-unknown}"
+          } >> "$GITHUB_STEP_SUMMARY"
