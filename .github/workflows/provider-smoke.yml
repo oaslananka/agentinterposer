@@ -14,6 +14,7 @@ on:
         default: full
         type: choice
         options:
+          - baseline
           - full
           - codex
 
@@ -65,7 +66,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Probe Chat Completions
-        if: ${{ inputs.scope == 'full' }}
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'baseline' }}
         id: chat
         shell: bash
         env:
@@ -489,6 +490,8 @@ jobs:
             if [ "$SCOPE" = 'codex' ]; then
               echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
               echo "- Codex Responses tool round trip: ${CODEX_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'baseline' ]; then
+              echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             else
               echo "- Chat Completions step: ${CHAT_OUTCOME:-not-run}"
               echo "- Responses API: ${RESPONSES_SUPPORTED:-unknown}"
