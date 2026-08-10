@@ -59,6 +59,8 @@ jobs:
 
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -462,6 +464,16 @@ jobs:
           done
           echo 'codex_os_user_isolation=ok'
           echo 'codex_secret_environment_isolation=ok'
+          if sudo -u "$codex_user" -- sudo -n true >/dev/null 2>&1; then
+            echo 'Codex certification user unexpectedly has passwordless sudo.' >&2
+            exit 1
+          fi
+          echo 'codex_privilege_escalation_blocked=ok'
+          if sudo -u "$codex_user" -- git -C "$GITHUB_WORKSPACE" config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1; then
+            echo 'Checkout persisted a Git authorization header visible to Codex.' >&2
+            exit 1
+          fi
+          echo 'codex_git_credentials_not_persisted=ok'
 
           isolated_version="$(sudo -u "$codex_user" -- env -i \
             HOME="$codex_home" \
