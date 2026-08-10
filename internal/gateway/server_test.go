@@ -453,3 +453,71 @@ func TestHandlerPreservesCodexFunctionCallStreamingEvents(t *testing.T) {
 		t.Fatalf("Codex function-call stream changed in transit\ngot:  %q\nwant: %q", got, events)
 	}
 }
+
+type segmentedReader struct {
+	chunks [][]byte
+}
+
+func (r *segmentedReader) Read(p []byte) (int, error) {
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	chunk := r.chunks[0]
+	r.chunks = r.chunks[1:]
+	return copy(p, chunk), nil
+}
+
+type recordingFlusher struct {
+	header  http.Header
+	writes  []string
+	flushes int
+}
+
+func (w *recordingFlusher) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *recordingFlusher) Write(p []byte) (int, error) {
+	w.writes = append(w.writes, string(p))
+	return len(p), nil
+}
+
+func (w *recordingFlusher) WriteHeader(_ int) {}
+
+func (w *recordingFlusher) Flush() {
+	w.flushes++
+}
+
+func TestCopyResponseBodyFramesSSEWritesAtEventBoundaries(t *testing.T) {
+	t.Parallel()
+
+	const firstEvent = "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\"}\n\n"
+	const secondEvent = "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+	reader := &segmentedReader{chunks: [][]byte{
+		[]byte("event: response.output_"),
+		[]byte("item.done\ndata: {\"type\":\"response.output_item.done\"}\n"),
+		[]byte("\n"),
+		[]byte(secondEvent),
+	}}
+	writer := &recordingFlusher{}
+
+	if err := copyResponseBody(writer, reader, "text/event-stream; charset=utf-8"); err != nil {
+		t.Fatalf("copyResponseBody() error = %v", err)
+	}
+
+	wantWrites := []string{firstEvent, secondEvent}
+	if len(writer.writes) != len(wantWrites) {
+		t.Fatalf("stream writes = %d, want %d; writes=%q", len(writer.writes), len(wantWrites), writer.writes)
+	}
+	for i, want := range wantWrites {
+		if got := writer.writes[i]; got != want {
+			t.Fatalf("stream write %d = %q, want complete SSE event %q", i, got, want)
+		}
+	}
+	if writer.flushes != len(wantWrites) {
+		t.Fatalf("flushes = %d, want %d", writer.flushes, len(wantWrites))
+	}
+}
