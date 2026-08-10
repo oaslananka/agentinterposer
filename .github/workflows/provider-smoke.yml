@@ -261,6 +261,79 @@ jobs:
           PY
           echo 'responses_tool_verified=true' >> "$GITHUB_OUTPUT"
 
+      - name: Probe Responses function call stream
+        id: responses_tool_stream
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          trap 'rm -f "$body"' EXIT
+
+          set +e
+          status="$(curl --silent --show-error --no-buffer \
+            --max-time 90 \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'https://integrate.api.nvidia.com/v1/responses' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "input": "Call proof_reader with value ping. Do not answer directly.", "tools": [{"type": "function", "name": "proof_reader", "description": "Return a proof value", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"], "additionalProperties": False}}], "tool_choice": "required", "parallel_tool_calls": False, "max_output_tokens": 256, "stream": True}))')")"
+          curl_status=$?
+          set -e
+
+          echo "responses_tool_stream_curl_exit=${curl_status}"
+          echo "responses_tool_stream_http=${status}"
+          if [ "$curl_status" -ne 0 ]; then
+            echo 'Streaming Responses function-call probe timed out or failed at the transport layer.' >&2
+            exit "$curl_status"
+          fi
+          if [[ ! "$status" =~ ^2 ]]; then
+            echo 'Streaming Responses function-call probe returned a non-2xx status.' >&2
+            exit 1
+          fi
+
+          python3 - "$body" <<'PY'
+          import json
+          import sys
+
+          event_types = []
+          function_call_seen = False
+          completed_seen = False
+          for raw in open(sys.argv[1], encoding="utf-8"):
+              line = raw.strip()
+              if line.startswith("event:"):
+                  event_types.append(line.split(":", 1)[1].strip())
+                  continue
+              if not line.startswith("data:"):
+                  continue
+              payload = line.split(":", 1)[1].strip()
+              if payload == "[DONE]":
+                  continue
+              try:
+                  data = json.loads(payload)
+              except Exception:
+                  continue
+              event_type = data.get("type")
+              if event_type and event_type not in event_types:
+                  event_types.append(str(event_type))
+              item = data.get("item")
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  function_call_seen = True
+              if event_type == "response.completed":
+                  completed_seen = True
+          print("responses_tool_stream_events=" + ",".join(dict.fromkeys(event_types)))
+          if not function_call_seen:
+              raise SystemExit("Streaming Responses probe emitted no function_call item")
+          if not completed_seen:
+              raise SystemExit("Streaming Responses probe emitted no response.completed event")
+          print("responses_function_call_stream=ok")
+          PY
+          echo 'responses_tool_stream_verified=true' >> "$GITHUB_OUTPUT"
+
       - name: Probe AgentInterposer Responses passthrough
         shell: bash
         env:
@@ -449,6 +522,10 @@ jobs:
               if isinstance(item, dict):
                   item_type = str(item.get("type") or "unknown")
                   item_counts[item_type] = item_counts.get(item_type, 0) + 1
+                  if item_type == "error":
+                      item_message = item.get("message") or item.get("error")
+                      if item_message:
+                          errors.append(str(item_message)[:240])
               error = event.get("error")
               if isinstance(error, dict):
                   message = error.get("message") or error.get("type")
@@ -484,6 +561,7 @@ jobs:
           MESSAGES_SUPPORTED: ${{ steps.messages.outputs.messages_supported }}
           CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
           RESPONSES_TOOL_VERIFIED: ${{ steps.responses_tool.outputs.responses_tool_verified }}
+          RESPONSES_TOOL_STREAM_VERIFIED: ${{ steps.responses_tool_stream.outputs.responses_tool_stream_verified }}
         run: |
           {
             echo '## NVIDIA hosted compatibility probe'
@@ -494,6 +572,7 @@ jobs:
             echo "- Anthropic Messages API: ${MESSAGES_SUPPORTED:-unknown}"
             echo '- AgentInterposer Responses passthrough: verified'
             echo "- Responses function call: ${RESPONSES_TOOL_VERIFIED:-unknown}"
+            echo "- Responses streaming function call: ${RESPONSES_TOOL_STREAM_VERIFIED:-unknown}"
             echo "- Codex CLI 0.147.0 Responses tool round trip: ${CODEX_VERIFIED:-unknown}"
             echo '- Codex NVIDIA profile: web search disabled; multi-agent namespace disabled'
           } >> "$GITHUB_STEP_SUMMARY"
