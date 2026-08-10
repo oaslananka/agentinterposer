@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides a hardened OpenAI-compatible Chat Completions path. OpenAI Responses and Anthropic Messages compatibility are planned as separate, test-driven protocol adapters rather than being claimed before they are verified.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions and native Responses passthrough paths. Anthropic Messages compatibility remains a separate, test-driven adapter rather than being claimed before it is verified.
 
 ## Why AgentInterposer?
 
@@ -22,7 +22,8 @@ The first vertical slice supports:
 
 - `GET /healthz`
 - `POST /v1/chat/completions`
-- OpenAI-compatible request/response passthrough to an upstream provider
+- `POST /v1/responses`
+- OpenAI-compatible request/response passthrough to an upstream provider without JSON translation
 - server-owned upstream bearer authentication (client credentials are not forwarded)
 - bounded upstream concurrency (default: `3`)
 - exponential retry for `429`, `500`, `502`, `503`, and `504` responses
@@ -30,7 +31,7 @@ The first vertical slice supports:
 - configurable request-size protection (default: `32 MiB`)
 - safe loopback binding by default (`127.0.0.1:11435`)
 
-The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com`, whose hosted Nemotron APIs expose OpenAI-compatible Chat Completions.
+The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com`. AgentInterposer uses native upstream Responses support when the provider exposes it instead of translating Responses payloads into Chat Completions.
 
 ## Architecture
 
@@ -38,6 +39,7 @@ The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com
 Coding agent / OpenAI-compatible client
                  |
                  | POST /v1/chat/completions
+                 | POST /v1/responses
                  v
           AgentInterposer
           127.0.0.1:11435
@@ -50,7 +52,7 @@ Coding agent / OpenAI-compatible client
         (NVIDIA by default)
 ```
 
-Protocol adapters for Codex/OpenAI Responses and Claude/Anthropic Messages will sit above the same reliability core as they are implemented and compatibility-tested.
+OpenAI Responses currently uses native passthrough through the same reliability core. Claude/Anthropic Messages requires a protocol adapter when the selected upstream does not expose `/v1/messages`.
 
 ## Quick start
 
@@ -99,6 +101,20 @@ curl http://127.0.0.1:11435/v1/chat/completions \
   }'
 ```
 
+Send a native Responses request:
+
+```bash
+curl http://127.0.0.1:11435/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "nvidia/nemotron-3-super-120b-a12b",
+    "input": "Reply only with OK",
+    "max_output_tokens": 16
+  }'
+```
+
+This establishes the transport needed by Responses-based clients. Full Codex compatibility still requires streaming, function-call, and agent-behavior certification before the project claims it.
+
 ## Configuration
 
 | Environment variable | Default | Purpose |
@@ -118,8 +134,8 @@ For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_
 
 Near-term work is intentionally compatibility-first:
 
-1. OpenAI Responses (`/v1/responses`) adapter for Codex-style clients.
-2. Anthropic Messages (`/v1/messages`) adapter for Claude-style clients.
+1. Codex/Responses streaming and function-call compatibility certification on the native passthrough path.
+2. Anthropic Messages (`/v1/messages`) adapter for Claude-style clients when upstreams do not expose it.
 3. Streaming tool-call and reasoning normalization tests.
 4. Model capability profiles and compatibility certification tests.
 5. Capability-aware fallback and provider routing.

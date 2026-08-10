@@ -283,3 +283,93 @@ func TestHandlerAcceptsUpstreamBaseURLWithV1Suffix(t *testing.T) {
 		t.Fatalf("upstream path = %q, want /v1/chat/completions", gotPath)
 	}
 }
+
+func TestHandlerForwardsResponsesRequestWithoutTranslation(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotAuthorization string
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthorization = r.Header.Get("Authorization")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"resp_test","object":"response","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       2,
+		MaxRetries:          0,
+		MaxRequestBytes:     1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	const body = `{"model":"nvidia/test","input":"Reply only with OK","stream":false}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer client-token")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses", gotPath)
+	}
+	if gotAuthorization != "Bearer server-secret" {
+		t.Fatalf("upstream authorization = %q, want server-owned bearer token", gotAuthorization)
+	}
+	if strings.Contains(gotAuthorization, "client-token") {
+		t.Fatal("client authorization leaked upstream")
+	}
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want exact passthrough", gotBody)
+	}
+}
+
+func TestHandlerFlushesStreamingResponsesAPI(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("upstream path = %q, want /v1/responses", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"nvidia/test","input":"hi","stream":true}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !response.Flushed {
+		t.Fatal("Responses API stream was not flushed")
+	}
+}
