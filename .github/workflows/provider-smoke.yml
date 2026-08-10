@@ -511,40 +511,6 @@ jobs:
           echo "codex_exit=$codex_status"
           if [ "$codex_status" -ne 0 ]; then
             echo 'Codex Responses tool round trip did not complete.' >&2
-            python3 - "$codex_stderr" <<'PYSTDERR'
-          import pathlib
-          import re
-          import sys
-
-          path = pathlib.Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-          lowered = text.lower()
-          classes = {
-              "permission_denied": ("permission denied", "eacces", "os error 13"),
-              "operation_not_permitted": ("operation not permitted", "eperm", "os error 1"),
-              "sandbox": ("sandbox", "bwrap", "bubblewrap", "landlock", "seccomp"),
-              "missing_path": ("no such file or directory", "enoent", "os error 2"),
-              "config": ("config.toml", "configuration", "config error"),
-              "model": ("model not found", "unknown model", "unsupported model"),
-              "auth": ("unauthorized", "authentication", "api key", "401", "403"),
-              "network": ("connection refused", "connection reset", "timed out", "dns", "network"),
-          }
-          matched = [name for name, needles in classes.items() if any(needle in lowered for needle in needles)]
-          print("codex_stderr_bytes=" + str(len(text.encode("utf-8"))))
-          print("codex_stderr_lines=" + str(len(text.splitlines())))
-          print("codex_stderr_classes=" + (",".join(matched) if matched else "other"))
-
-          def redact(line):
-              line = re.sub(r"https?://\S+", "<url>", line)
-              line = re.sub(r"(?<![A-Za-z0-9_.-])/(?:[^\s/:]+/)*[^\s:]*", "<path>", line)
-              line = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>", line, flags=re.I)
-              line = line.replace("local-client-placeholder", "<client-key>")
-              line = re.sub(r"[A-Za-z0-9_./+=:-]{24,}", "<opaque>", line)
-              return "".join(ch for ch in line if ch.isprintable())[:240]
-
-          for index, line in enumerate(text.splitlines()[:3], start=1):
-              print(f"codex_stderr_redacted_{index}=" + redact(line))
-          PYSTDERR
           fi
 
           set +e
@@ -579,40 +545,15 @@ jobs:
               status = str(item.get("status") or "unknown")
               exit_code = item.get("exit_code")
               output = item.get("aggregated_output")
-              command = item.get("command")
               output_bytes = len(output.encode("utf-8")) if isinstance(output, str) else 0
-              command_results.append((status, exit_code, output_bytes, command, output))
+              command_results.append((status, exit_code, output_bytes))
               if status == "completed" and exit_code == 0 and isinstance(output, str):
                   successful_outputs.append(output)
 
           print("codex_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)))
           print("codex_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)))
-          import os
-          import shlex
-
-          for index, (status, exit_code, output_bytes, command, output) in enumerate(command_results, start=1):
+          for index, (status, exit_code, output_bytes) in enumerate(command_results, start=1):
               print(f"codex_command_result_{index}=status:{status},exit:{exit_code},output_bytes:{output_bytes}")
-              argv = []
-              if isinstance(command, str):
-                  try:
-                      argv = shlex.split(command)
-                  except ValueError:
-                      pass
-              executable = os.path.basename(argv[0]) if argv else "unparsed"
-              has_metachar = isinstance(command, str) and any(token in command for token in (";", "&&", "||", "|", "`", "$(`"))
-              print(f"codex_command_shape_{index}=executable:{executable},argv_count:{len(argv)},uuid_path:{'/proc/sys/kernel/random/uuid' in argv},metachar:{str(has_metachar).lower()}")
-              lowered = output.lower() if isinstance(output, str) else ""
-              classes = {
-                  "permission_denied": "permission denied" in lowered,
-                  "no_such_file": "no such file" in lowered,
-                  "is_directory": "is a directory" in lowered,
-                  "not_found": "not found" in lowered,
-                  "syntax_error": "syntax error" in lowered,
-                  "operation_not_permitted": "operation not permitted" in lowered,
-                  "sandbox": "sandbox" in lowered,
-              }
-              matched = [key for key, value in classes.items() if value]
-              print("codex_command_error_class_" + str(index) + "=" + (",".join(matched) if matched else "other"))
           print("codex_completed_command_count=" + str(len(command_results)))
 
           if len(command_results) != 1 or len(successful_outputs) != 1:
