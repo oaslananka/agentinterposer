@@ -928,11 +928,47 @@ jobs:
               --max-turns 3 \
               --output-format stream-json \
               --verbose \
+              --debug \
+              --debug-file "$claude_home/debug.log" \
               >"$claude_output" 2>"$claude_stderr"
           )
           claude_exit=$?
           set -e
           echo "claude_code_exit=${claude_exit}"
+          python3 - "$claude_home/debug.log" <<'PY'
+          import os
+          import sys
+
+          path = sys.argv[1]
+          text = open(path, encoding="utf-8", errors="replace").read().lower() if os.path.exists(path) else ""
+          patterns = [
+              ("creating shell snapshot", "snapshot-start"),
+              ("shell snapshot created successfully", "snapshot-success"),
+              ("shell snapshot creation failed", "snapshot-failed"),
+              ("failed to create shell snapshot", "snapshot-failed"),
+              ("shell config file not found", "shell-config-missing"),
+              ("bash tool", "bash-tool"),
+              ("bashtool", "bash-tool"),
+              ("exit code 1", "exit-code-1"),
+              ("enoent", "enoent"),
+              ("eacces", "eacces"),
+              ("permission denied", "permission"),
+              ("operation not permitted", "operation-not-permitted"),
+              ("spawn", "spawn"),
+              ("shell snapshot", "snapshot-any"),
+          ]
+          counts = {}
+          for needle, label in patterns:
+              counts[label] = counts.get(label, 0) + text.count(needle)
+          active = [label for label, count in counts.items() if count]
+          print("claude_code_debug_bytes=" + str(len(text.encode("utf-8"))))
+          print("claude_code_debug_classes=" + ("+".join(active) if active else "none"))
+          print("claude_code_debug_snapshot_start_count=" + str(counts.get("snapshot-start", 0)))
+          print("claude_code_debug_snapshot_success_count=" + str(counts.get("snapshot-success", 0)))
+          print("claude_code_debug_snapshot_failed_count=" + str(counts.get("snapshot-failed", 0)))
+          print("claude_code_debug_shell_config_missing_count=" + str(counts.get("shell-config-missing", 0)))
+          print("claude_code_debug_exit_code_1_count=" + str(counts.get("exit-code-1", 0)))
+          PY
           if [ -s "$claude_capture_dir/response_1.sse" ]; then
             replay_home='/tmp/agentinterposer-claude-replay-home'
             replay_summary="$RUNNER_TEMP/claude-code-replay-summary.json"
