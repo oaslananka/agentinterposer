@@ -891,6 +891,7 @@ jobs:
             sudo -u "$claude_user" env -i \
             HOME="$claude_home" \
             PATH="/usr/local/bin:/usr/bin:/bin" \
+            CLAUDE_CODE_SHELL='/bin/bash' \
             AGENTINTERPOSER_TOOL_PROOF="$proof" \
             CLAUDE_CONFIG_DIR="$claude_home/.claude" \
             ANTHROPIC_BASE_URL='http://127.0.0.1:11434' \
