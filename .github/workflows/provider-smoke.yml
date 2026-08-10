@@ -500,6 +500,7 @@ jobs:
             echo 'Codex Responses tool round trip did not complete.' >&2
             python3 - "$codex_stderr" <<'PYSTDERR'
           import pathlib
+          import re
           import sys
 
           path = pathlib.Path(sys.argv[1])
