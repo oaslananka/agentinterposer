@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -113,14 +112,8 @@ func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	copyHeader(w.Header(), upstreamResponse.Header, "Content-Type")
 	copyHeader(w.Header(), upstreamResponse.Header, "Cache-Control")
 	copyHeader(w.Header(), upstreamResponse.Header, "Retry-After")
-	contentType := upstreamResponse.Header.Get("Content-Type")
-	if r.ProtoMajor == 1 && strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
-		// net/http uses identity internally to suppress HTTP/1.x chunking and
-		// close the response at EOF; the Transfer-Encoding header is not emitted.
-		w.Header().Set("Transfer-Encoding", "identity")
-	}
 	w.WriteHeader(upstreamResponse.StatusCode)
-	_ = copyResponseBody(w, upstreamResponse.Body, contentType)
+	_ = copyResponseBody(w, upstreamResponse.Body, upstreamResponse.Header.Get("Content-Type"))
 }
 
 func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string) error {
@@ -135,38 +128,22 @@ func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string)
 		return err
 	}
 
-	reader := bufio.NewReaderSize(body, 32*1024)
-	event := make([]byte, 0, 32*1024)
+	buffer := make([]byte, 32*1024)
 	for {
-		line, readErr := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			event = append(event, line...)
-			if isSSEEventBoundary(line) {
-				if _, writeErr := w.Write(event); writeErr != nil {
-					return writeErr
-				}
-				flusher.Flush()
-				event = event[:0]
+		n, readErr := body.Read(buffer)
+		if n > 0 {
+			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+				return writeErr
 			}
+			flusher.Flush()
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				if len(event) > 0 {
-					if _, writeErr := w.Write(event); writeErr != nil {
-						return writeErr
-					}
-					flusher.Flush()
-				}
 				return nil
 			}
 			return readErr
 		}
 	}
-}
-
-func isSSEEventBoundary(line []byte) bool {
-	return len(line) == 1 && line[0] == '\n' ||
-		len(line) == 2 && line[0] == '\r' && line[1] == '\n'
 }
 
 func (h *handler) doUpstream(r *http.Request, body []byte, upstreamPath string) (*http.Response, error) {
