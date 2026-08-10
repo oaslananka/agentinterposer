@@ -19,14 +19,31 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Validate secret availability
+      - name: Validate Doppler bootstrap token
         shell: bash
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOPPLER_TOKEN:-}" ]; then
+            echo "DOPPLER_TOKEN is not configured for this repository." >&2
+            exit 1
+          fi
+
+      - name: Fetch runtime secrets from Doppler
+        id: doppler
+        uses: DopplerHQ/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Validate NVIDIA credential from Doppler
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${NVIDIA_API_KEY:-}" ]; then
-            echo "NVIDIA_API_KEY is not configured for this repository." >&2
+            echo "NVIDIA_API_KEY was not returned by Doppler." >&2
             exit 1
           fi
 
@@ -41,7 +58,7 @@ jobs:
       - name: Probe Chat Completions
         shell: bash
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
         run: |
           set -euo pipefail
@@ -87,7 +104,7 @@ jobs:
         id: responses
         shell: bash
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
         run: |
           set -euo pipefail
@@ -134,7 +151,7 @@ jobs:
         id: messages
         shell: bash
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
         run: |
           set -euo pipefail
@@ -181,7 +198,7 @@ jobs:
       - name: Probe AgentInterposer Responses passthrough
         shell: bash
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
         run: |
           set -euo pipefail
