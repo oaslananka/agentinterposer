@@ -1024,36 +1024,35 @@ jobs:
           print("codex_replay_function_call_output=true")
           PYREPLAYCHECK
 
-          buffer_home="$RUNNER_TEMP/codex-buffer-home"
-          buffer_ready="$RUNNER_TEMP/codex-buffer-ready"
-          buffer_state="$RUNNER_TEMP/codex-buffer-state.json"
-          buffer_first_request="$RUNNER_TEMP/codex-buffer-request-1.json"
-          buffer_second_request="$RUNNER_TEMP/codex-buffer-request-2.json"
-          buffer_response="$RUNNER_TEMP/codex-buffer-response.sse"
-          buffer_jsonl="$RUNNER_TEMP/codex-buffer-events.jsonl"
-          buffer_stderr="$RUNNER_TEMP/codex-buffer-stderr.log"
-          mkdir -p "$buffer_home"
+          framed_home="$RUNNER_TEMP/codex-framed-home"
+          framed_ready="$RUNNER_TEMP/codex-framed-ready"
+          framed_state="$RUNNER_TEMP/codex-framed-state.json"
+          framed_first_request="$RUNNER_TEMP/codex-framed-request-1.json"
+          framed_second_request="$RUNNER_TEMP/codex-framed-request-2.json"
+          framed_response="$RUNNER_TEMP/codex-framed-response.sse"
+          framed_jsonl="$RUNNER_TEMP/codex-framed-events.jsonl"
+          framed_stderr="$RUNNER_TEMP/codex-framed-stderr.log"
+          mkdir -p "$framed_home"
 
-          python3 - "$codex_home/config.toml" "$buffer_home/config.toml" <<'PYBUFFERCFG'
+          python3 - "$codex_home/config.toml" "$framed_home/config.toml" <<'PYFRAMEDCFG'
           import sys
 
           source, target = sys.argv[1], sys.argv[2]
           text = open(source, encoding="utf-8").read()
-          text = text.replace('name = "AgentInterposer certification"', 'name = "NVIDIA buffered live diagnostic"')
-          text = text.replace('base_url = "http://127.0.0.1:11435/v1"', 'base_url = "http://127.0.0.1:11437/v1"')
-          text = text.replace('env_key = "AGENTINTERPOSER_CLIENT_KEY"', 'env_key = "BUFFER_CLIENT_KEY"')
+          text = text.replace('name = "AgentInterposer certification"', 'name = "NVIDIA event-framed live diagnostic"')
+          text = text.replace('base_url = "http://127.0.0.1:11435/v1"', 'base_url = "http://127.0.0.1:11438/v1"')
+          text = text.replace('env_key = "AGENTINTERPOSER_CLIENT_KEY"', 'env_key = "FRAMED_CLIENT_KEY"')
           with open(target, "w", encoding="utf-8") as handle:
               handle.write(text)
-          PYBUFFERCFG
+          PYFRAMEDCFG
 
-          python3 - "$buffer_ready" "$buffer_state" "$buffer_first_request" "$buffer_second_request" "$buffer_response" <<'PYBUFFER' &
+          python3 - "$framed_ready" "$framed_state" "$framed_first_request" "$framed_second_request" "$framed_response" <<'PYFRAMED' &
           import http.server
           import json
           import os
           import pathlib
           import sys
           import time
-          import urllib.error
           import urllib.request
 
           ready_path, state_path, first_path, second_path, response_path = map(pathlib.Path, sys.argv[1:])
@@ -1093,7 +1092,7 @@ jobs:
                       second_path.write_bytes(body)
                       state["second_request"] = True
                       write_state()
-                      payload = b'{"error":{"message":"buffer diagnostic complete"}}\n'
+                      payload = b'{"error":{"message":"framed diagnostic complete"}}\n'
                       self.send_response(500)
                       self.send_header("Content-Type", "application/json")
                       self.send_header("Content-Length", str(len(payload)))
@@ -1114,91 +1113,108 @@ jobs:
                       method="POST",
                   )
                   started = time.monotonic()
+                  collected = bytearray()
+                  event_buffer = bytearray()
                   try:
                       with urllib.request.urlopen(request, timeout=150) as upstream:
                           state["upstream_status"] = int(upstream.status)
                           state["upstream_headers_ms"] = int((time.monotonic() - started) * 1000)
-                          payload = upstream.read()
+                          write_state()
+                          self.send_response(200)
+                          self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                          self.send_header("Cache-Control", "no-cache")
+                          self.end_headers()
+                          event_count = 0
+                          first_event_ms = None
+                          while True:
+                              line = upstream.readline()
+                              if not line:
+                                  break
+                              collected.extend(line)
+                              event_buffer.extend(line)
+                              if line not in (b"\n", b"\r\n"):
+                                  continue
+                              self.wfile.write(event_buffer)
+                              self.wfile.flush()
+                              event_buffer.clear()
+                              event_count += 1
+                              if first_event_ms is None:
+                                  first_event_ms = int((time.monotonic() - started) * 1000)
+                          if event_buffer:
+                              self.wfile.write(event_buffer)
+                              self.wfile.flush()
+                              event_count += 1
+                              if first_event_ms is None:
+                                  first_event_ms = int((time.monotonic() - started) * 1000)
                   except Exception as exc:
                       state["upstream_error_type"] = type(exc).__name__
                       write_state()
-                      error_body = b'{"error":{"message":"buffer upstream failed"}}\n'
-                      self.send_response(502)
-                      self.send_header("Content-Type", "application/json")
-                      self.send_header("Content-Length", str(len(error_body)))
-                      self.end_headers()
-                      self.wfile.write(error_body)
                       return
 
+                  payload = bytes(collected)
                   response_path.write_bytes(payload)
                   events = event_types(payload)
                   state["upstream_completed"] = True
                   state["upstream_complete_ms"] = int((time.monotonic() - started) * 1000)
+                  state["first_event_ms"] = first_event_ms
+                  state["forwarded_event_blocks"] = event_count
                   state["upstream_bytes"] = len(payload)
                   state["response_completed_seen"] = "response.completed" in events
                   write_state()
 
-                  self.send_response(200)
-                  self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                  self.send_header("Cache-Control", "no-cache")
-                  self.send_header("Content-Length", str(len(payload)))
-                  self.end_headers()
-                  self.wfile.write(payload)
-                  self.wfile.flush()
-
-          server = http.server.ThreadingHTTPServer(("127.0.0.1", 11437), Handler)
+          server = http.server.ThreadingHTTPServer(("127.0.0.1", 11438), Handler)
           ready_path.write_text("ready", encoding="utf-8")
           server.serve_forever()
-          PYBUFFER
+          PYFRAMED
           buffer_pid=$!
 
           for _ in {1..50}; do
-            if [ -s "$buffer_ready" ]; then
+            if [ -s "$framed_ready" ]; then
               break
             fi
             sleep 0.1
           done
-          if [ ! -s "$buffer_ready" ]; then
-            echo 'Buffered live diagnostic server did not become ready.' >&2
+          if [ ! -s "$framed_ready" ]; then
+            echo 'Event-framed live diagnostic server did not become ready.' >&2
             exit 1
           fi
 
           set +e
           timeout --signal=TERM --kill-after=5s 180s \
-            env CODEX_HOME="$buffer_home" \
-            BUFFER_CLIENT_KEY='local-buffer-placeholder' \
+            env CODEX_HOME="$framed_home" \
+            FRAMED_CLIENT_KEY='local-framed-placeholder' \
             "$codex" exec \
               --ephemeral \
               --sandbox read-only \
               --ignore-rules \
               --json \
-              "$prompt" >"$buffer_jsonl" 2>"$buffer_stderr"
-          buffer_codex_status=$?
+              "$prompt" >"$framed_jsonl" 2>"$framed_stderr"
+          framed_codex_status=$?
           set -e
 
           kill "$buffer_pid" 2>/dev/null || true
           wait "$buffer_pid" 2>/dev/null || true
           buffer_pid=''
-          echo "codex_buffer_exit=${buffer_codex_status}"
+          echo "codex_framed_exit=${framed_codex_status}"
 
-          python3 - "$buffer_state" "$buffer_response" "$buffer_second_request" <<'PYBUFFERCHECK'
+          python3 - "$framed_state" "$framed_response" "$framed_second_request" <<'PYFRAMEDCHECK'
           import json
           import pathlib
           import sys
 
           state_path, response_path, second_path = map(pathlib.Path, sys.argv[1:])
           if not state_path.is_file():
-              raise SystemExit("Buffered live diagnostic produced no state")
+              raise SystemExit("Event-framed live diagnostic produced no state")
           state = json.loads(state_path.read_text(encoding="utf-8"))
-          for key in ("upstream_status", "upstream_headers_ms", "upstream_complete_ms", "upstream_bytes", "response_completed_seen", "second_request"):
+          for key in ("upstream_status", "upstream_headers_ms", "first_event_ms", "upstream_complete_ms", "forwarded_event_blocks", "upstream_bytes", "response_completed_seen", "second_request"):
               if key in state:
-                  print(f"codex_buffer_{key}={state[key]}")
+                  print(f"codex_framed_{key}={state[key]}")
           if not state.get("upstream_completed"):
-              raise SystemExit("Buffered live NVIDIA request did not complete within the diagnostic window")
+              raise SystemExit("Event-framed live NVIDIA request did not complete within the diagnostic window")
           if not state.get("response_completed_seen"):
-              raise SystemExit("Buffered live NVIDIA response had no response.completed event")
+              raise SystemExit("Event-framed live NVIDIA response had no response.completed event")
           if not second_path.is_file():
-              raise SystemExit("Codex sent no second request after fully buffered live NVIDIA SSE")
+              raise SystemExit("Codex sent no second request after event-framed live NVIDIA SSE")
 
           call_id = None
           for raw in response_path.read_text(encoding="utf-8").splitlines():
@@ -1218,15 +1234,15 @@ jobs:
                   call_id = item.get("call_id")
                   break
           if not isinstance(call_id, str) or not call_id:
-              raise SystemExit("Buffered live NVIDIA SSE contained no completed function_call")
+              raise SystemExit("Event-framed live NVIDIA SSE contained no completed function_call")
 
           second = json.loads(second_path.read_text(encoding="utf-8"))
           inputs = second.get("input") or []
           outputs = [item for item in inputs if isinstance(item, dict) and item.get("type") == "function_call_output"]
           if not any(item.get("call_id") == call_id for item in outputs):
-              raise SystemExit("Buffered live Codex function_call_output did not match the NVIDIA call_id")
-          print("codex_buffer_function_call_output=true")
-          PYBUFFERCHECK
+              raise SystemExit("Event-framed live Codex function_call_output did not match the NVIDIA call_id")
+          print("codex_framed_function_call_output=true")
+          PYFRAMEDCHECK
 
           set +e
           timeout --signal=TERM --kill-after=10s 120s \
