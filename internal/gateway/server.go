@@ -113,8 +113,14 @@ func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	copyHeader(w.Header(), upstreamResponse.Header, "Content-Type")
 	copyHeader(w.Header(), upstreamResponse.Header, "Cache-Control")
 	copyHeader(w.Header(), upstreamResponse.Header, "Retry-After")
+	contentType := upstreamResponse.Header.Get("Content-Type")
+	if r.ProtoMajor == 1 && strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
+		// net/http uses identity internally to suppress HTTP/1.x chunking and
+		// close the response at EOF; the Transfer-Encoding header is not emitted.
+		w.Header().Set("Transfer-Encoding", "identity")
+	}
 	w.WriteHeader(upstreamResponse.StatusCode)
-	_ = copyResponseBody(w, upstreamResponse.Body, upstreamResponse.Header.Get("Content-Type"))
+	_ = copyResponseBody(w, upstreamResponse.Body, contentType)
 }
 
 func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string) error {

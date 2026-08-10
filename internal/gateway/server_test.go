@@ -521,3 +521,52 @@ func TestCopyResponseBodyFramesSSEWritesAtEventBoundaries(t *testing.T) {
 		t.Fatalf("flushes = %d, want %d", writer.flushes, len(wantWrites))
 	}
 }
+
+func TestHandlerUsesCloseDelimitedHTTP11ForSSE(t *testing.T) {
+	t.Parallel()
+
+	const events = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\"}}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = w.Write([]byte(events))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	gateway := httptest.NewServer(handler)
+	defer gateway.Close()
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/responses", strings.NewReader(`{"model":"nvidia/test","stream":true,"input":"hi"}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := gateway.Client().Do(request)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read gateway response: %v", err)
+	}
+	if string(body) != events {
+		t.Fatalf("response body = %q, want %q", body, events)
+	}
+	if !response.Close {
+		t.Fatal("SSE response kept the HTTP/1.1 connection reusable; want close-delimited transport")
+	}
+	if len(response.TransferEncoding) != 0 {
+		t.Fatalf("SSE transfer encoding = %v, want no transfer encoding", response.TransferEncoding)
+	}
+}
