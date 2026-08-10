@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions and native Responses passthrough paths. A manual compatibility probe now verifies Codex CLI `0.147.0` with `nvidia/nemotron-3-super-120b-a12b` for a real Responses shell-tool round trip through AgentInterposer. This is a narrow certification profile, not a claim of universal Codex or model compatibility. Anthropic Messages compatibility remains a separate, test-driven adapter rather than being claimed before it is verified.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and a non-streaming Anthropic Messages adapter for text and custom client tools. A manual compatibility probe verifies Codex CLI `0.147.0` with `nvidia/nemotron-3-super-120b-a12b` for a real Responses shell-tool round trip through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -23,6 +23,7 @@ The first vertical slice supports:
 - `GET /healthz`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /v1/messages` for non-streaming Anthropic-compatible text and custom client-tool requests
 - OpenAI-compatible request/response passthrough to an upstream provider without JSON translation
 - server-owned upstream bearer authentication (client credentials are not forwarded)
 - bounded upstream concurrency (default: `3`)
@@ -53,7 +54,7 @@ Coding agent / OpenAI-compatible client
         (NVIDIA by default)
 ```
 
-OpenAI Responses currently uses native passthrough through the same reliability core. Claude/Anthropic Messages requires a protocol adapter when the selected upstream does not expose `/v1/messages`.
+OpenAI Responses uses native passthrough through the same reliability core. The current Anthropic Messages path translates non-streaming text and custom client-tool requests to OpenAI-compatible Chat Completions when the selected upstream does not expose a usable hosted `/v1/messages` endpoint. Streaming Messages, image/thinking blocks, and broader Anthropic-specific features remain outside this adapter slice.
 
 ## Quick start
 
@@ -116,6 +117,21 @@ curl http://127.0.0.1:11435/v1/responses \
 
 This establishes the transport needed by Responses-based clients. The manual `Provider Smoke` workflow can also run the current `scope=codex` certification path: Codex CLI `0.147.0` -> AgentInterposer -> NVIDIA hosted Responses -> shell function call -> tool output -> final response. Other Codex versions, models, tool surfaces, and longer agent loops remain uncertified.
 
+Send a non-streaming Anthropic Messages request:
+
+```bash
+curl http://127.0.0.1:11435/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{
+    "model": "nvidia/nemotron-3-super-120b-a12b",
+    "max_tokens": 64,
+    "messages": [{"role": "user", "content": "Reply briefly with OK"}]
+  }'
+```
+
+This adapter currently covers non-streaming text, custom client `tools`, `tool_choice`, `tool_use`, and successful `tool_result` blocks. `stream: true`, `stop_sequences`, image/thinking blocks, server tools, and `tool_result` blocks with `is_error: true` are rejected rather than silently translated. The manual Provider Smoke `scope=messages` verifies a real NVIDIA-hosted text request and tool-result round trip.
+
 ## Configuration
 
 | Environment variable | Default | Purpose |
@@ -136,7 +152,7 @@ For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_
 Near-term work is intentionally compatibility-first:
 
 1. Broaden Codex/Responses certification beyond the current single-shell-tool Nemotron 3 Super profile to additional tools, agent loops, Codex versions, and models.
-2. Anthropic Messages (`/v1/messages`) adapter for Claude-style clients when upstreams do not expose it.
+2. Add Anthropic Messages SSE streaming and broaden the adapter beyond the current text/custom-client-tool slice.
 3. Streaming tool-call and reasoning normalization tests.
 4. Model capability profiles and compatibility certification tests.
 5. Capability-aware fallback and provider routing.
