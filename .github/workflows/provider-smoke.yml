@@ -299,11 +299,9 @@ jobs:
           codex_stderr="$RUNNER_TEMP/codex-stderr.log"
           final_message="$RUNNER_TEMP/codex-final.txt"
           model_catalog="$RUNNER_TEMP/codex-model-catalog.json"
-          proof_file="$GITHUB_WORKSPACE/.agentinterposer-codex-proof"
           pid=''
 
           cleanup() {
-            rm -f "$proof_file"
             if [ -n "$pid" ]; then
               kill "$pid" 2>/dev/null || true
               wait "$pid" 2>/dev/null || true
@@ -340,7 +338,6 @@ jobs:
           fi
 
           proof="AGENTINTERPOSER_CODEX_TOOL_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-          printf '%s\n' "$proof" > "$proof_file"
 
           python3 - "$codex_home/config.toml" "$model_catalog" "$MODEL" <<'PY'
           import json
@@ -420,11 +417,13 @@ jobs:
               handle.write('stream_max_retries = 0\n')
           PY
 
-          printf -v prompt 'Run exactly one shell command. The executable must be cat and its only argument must be "%s". Do not add another argument and do not run another command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the contents.' "$proof_file"
+          prompt='Run exactly one shell command. The executable must be printenv and its only argument must be AGENTINTERPOSER_TOOL_PROOF. Do not add another argument and do not run another command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the value.'
           set +e
           timeout --signal=TERM --kill-after=10s 180s \
-            env CODEX_HOME="$codex_home" \
+            env -u NVIDIA_API_KEY \
+            CODEX_HOME="$codex_home" \
             AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
+            AGENTINTERPOSER_TOOL_PROOF="$proof" \
             "$codex" exec \
               --ephemeral \
               --sandbox read-only \
