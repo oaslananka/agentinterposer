@@ -715,6 +715,7 @@ jobs:
           claude_stderr="$RUNNER_TEMP/claude-code-stderr.log"
           claude_user='agentinterposer-claude'
           claude_home='/tmp/agentinterposer-claude-home'
+          claude_settings='/tmp/agentinterposer-claude-home/settings.json'
           pid=''
 
           cleanup() {
@@ -751,6 +752,9 @@ jobs:
 
           sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
           sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
+          printf '%s\n' '{"permissions":{"allow":["Bash(cat /proc/sys/kernel/random/uuid)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
+          sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-code-settings.json" "$claude_settings"
+          rm -f "$RUNNER_TEMP/claude-code-settings.json"
           shell_pid=$$
           if sudo -u "$claude_user" sh -c "cat /proc/$shell_pid/environ >/dev/null 2>&1"; then
             echo 'Claude Code isolation failed: runner environment is readable.' >&2
@@ -794,7 +798,7 @@ jobs:
               --no-session-persistence \
               --tools 'Bash' \
               --permission-mode dontAsk \
-              --allowedTools 'Bash(cat /proc/sys/kernel/random/uuid)' \
+              --settings "$claude_settings" \
               --max-turns 3 \
               --output-format stream-json \
               --verbose \
@@ -890,6 +894,30 @@ jobs:
                   tokens = []
               print("claude_code_bash_command_token_count=" + str(len(tokens)))
               print("claude_code_bash_command_semantic_exact=" + str(tokens == ["cat", "/proc/sys/kernel/random/uuid"]).lower())
+
+          permission_events = [
+              event for event in events
+              if event.get("type") == "system" and event.get("subtype") == "permission_denied"
+          ]
+          print("claude_code_permission_denied_event_count=" + str(len(permission_events)))
+          if permission_events:
+              reason_type = permission_events[-1].get("decision_reason_type")
+              if not isinstance(reason_type, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", reason_type):
+                  reason_type = "unknown"
+              print("claude_code_permission_decision_reason_type=" + reason_type)
+              reason = " ".join(
+                  str(permission_events[-1].get(key, ""))
+                  for key in ("decision_reason", "message")
+              ).lower()
+              reason_labels = []
+              for needle, label in [
+                  ("rule", "rule"), ("mode", "mode"), ("deny", "deny"),
+                  ("ask", "ask"), ("outside", "outside-path"),
+                  ("sandbox", "sandbox"), ("permission", "permission"),
+              ]:
+                  if needle in reason and label not in reason_labels:
+                      reason_labels.append(label)
+              print("claude_code_permission_reason_classes=" + (",".join(reason_labels) if reason_labels else "other"))
 
           result = next((e for e in reversed(events) if e.get("type") == "result"), None)
           if result is not None:
