@@ -498,7 +498,7 @@ jobs:
               "$codex" exec \
                 --ephemeral \
                 --skip-git-repo-check \
-                --sandbox read-only \
+                --sandbox danger-full-access \
                 --ignore-rules \
                 --json \
                 --output-last-message "$final_message" \
