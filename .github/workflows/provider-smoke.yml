@@ -35,6 +35,8 @@ jobs:
         uses: DopplerHQ/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
         with:
           doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: oaslananka-ops
+          doppler-config: runtime
 
       - name: Validate NVIDIA credential from Doppler
         shell: bash
