@@ -463,6 +463,18 @@ jobs:
           echo 'codex_os_user_isolation=ok'
           echo 'codex_secret_environment_isolation=ok'
 
+          isolated_version="$(sudo -u "$codex_user" -- env -i \
+            HOME="$codex_home" \
+            PATH="$node_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+            CODEX_HOME="$codex_home" \
+            AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
+            "$codex" --version)"
+          if [ "$isolated_version" != 'codex-cli 0.147.0' ]; then
+            echo 'Codex launcher failed under the isolated certification user.' >&2
+            exit 1
+          fi
+          echo 'codex_isolated_launcher=ok'
+
           prompt='Run exactly one shell command. The executable must be cat and its only argument must be /proc/sys/kernel/random/uuid. Do not add another argument and do not run another command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the value.'
           set +e
           timeout --signal=TERM --kill-after=10s 180s \
@@ -507,6 +519,17 @@ jobs:
           print("codex_stderr_bytes=" + str(len(text.encode("utf-8"))))
           print("codex_stderr_lines=" + str(len(text.splitlines())))
           print("codex_stderr_classes=" + (",".join(matched) if matched else "other"))
+
+          def redact(line):
+              line = re.sub(r"https?://\S+", "<url>", line)
+              line = re.sub(r"(?<![A-Za-z0-9_.-])/(?:[^\s/:]+/)*[^\s:]*", "<path>", line)
+              line = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>", line, flags=re.I)
+              line = line.replace("local-client-placeholder", "<client-key>")
+              line = re.sub(r"[A-Za-z0-9_./+=:-]{24,}", "<opaque>", line)
+              return "".join(ch for ch in line if ch.isprintable())[:240]
+
+          for index, line in enumerate(text.splitlines()[:3], start=1):
+              print(f"codex_stderr_redacted_{index}=" + redact(line))
           PYSTDERR
           fi
 
