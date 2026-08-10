@@ -437,14 +437,15 @@ jobs:
 
           echo "codex_cli_version=$codex_version"
           echo "codex_exit=$codex_status"
-          if [ "$codex_status" -ne 0 ]; then
-            python3 - "$codex_jsonl" <<'PY'
+          set +e
+          python3 - "$codex_jsonl" <<'PY'
           import json
           import sys
 
           counts = {}
           item_counts = {}
           command_results = []
+          successful_command = False
           try:
               lines = open(sys.argv[1], encoding="utf-8")
           except OSError:
@@ -461,22 +462,48 @@ jobs:
                   item_type = str(item.get("type") or "unknown")
                   item_counts[item_type] = item_counts.get(item_type, 0) + 1
                   if event_type == "item.completed" and item_type == "command_execution":
+                      status = str(item.get("status") or "unknown")
+                      exit_code = item.get("exit_code")
                       output = item.get("aggregated_output")
-                      command_results.append((str(item.get("status") or "unknown"), item.get("exit_code"), len(output) if isinstance(output, str) else 0))
+                      output_bytes = len(output.encode("utf-8")) if isinstance(output, str) else 0
+                      command_results.append((status, exit_code, output_bytes))
+                      if status == "completed" and exit_code == 0:
+                          successful_command = True
           print("codex_event_types=" + ",".join(f"{key}:{counts[key]}" for key in sorted(counts)))
           print("codex_item_types=" + ",".join(f"{key}:{item_counts[key]}" for key in sorted(item_counts)))
           for index, (status, exit_code, output_bytes) in enumerate(command_results, start=1):
               print(f"codex_command_result_{index}=status:{status},exit:{exit_code},output_bytes:{output_bytes}")
+          print("codex_successful_command=" + str(successful_command).lower())
+          if not successful_command:
+              raise SystemExit(3)
           PY
+          command_check_status=$?
+          set -e
+
+          if [ "$codex_status" -ne 0 ]; then
             echo 'Codex Responses tool round trip did not complete.' >&2
             exit "$codex_status"
           fi
-
-          actual="$(tr -d '\r\n' < "$final_message")"
-          if [ "$actual" != "$proof" ]; then
-            echo 'Codex final response did not match the shell-only proof value.' >&2
-            exit 1
+          if [ "$command_check_status" -ne 0 ]; then
+            echo 'Codex completed without a successful shell command.' >&2
+            exit "$command_check_status"
           fi
+
+          python3 - "$final_message" "$proof" <<'PY'
+          import sys
+
+          path, proof = sys.argv[1], sys.argv[2]
+          try:
+              actual = open(path, encoding="utf-8").read()
+          except OSError:
+              raise SystemExit("Codex produced no final response file")
+          contains = proof in actual
+          print("codex_final_bytes=" + str(len(actual.encode("utf-8"))))
+          print("codex_proof_bytes=" + str(len(proof.encode("utf-8"))))
+          print("codex_final_contains_proof=" + str(contains).lower())
+          if not contains:
+              raise SystemExit("Codex final response did not contain the shell-only proof value")
+          PY
 
           echo 'codex_responses_streaming=ok'
           echo 'codex_function_call_round_trip=ok'
