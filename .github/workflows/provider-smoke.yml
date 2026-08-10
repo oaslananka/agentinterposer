@@ -399,6 +399,7 @@ jobs:
           PY
 
       - name: Probe Codex Responses tool round trip
+        if: ${{ always() && steps.doppler.outcome == 'success' }}
         id: codex
         shell: bash
         env:
