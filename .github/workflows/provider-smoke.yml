@@ -446,11 +446,12 @@ jobs:
           buffer_pid=''
           gateway_replay_pid=''
           gateway_replay_upstream_pid=''
+          reference_pid=''
 
           cleanup() {
             rm -f "$proof_file"
             rm -rf "$diag_dir"
-            for child in "$gateway_replay_pid" "$gateway_replay_upstream_pid" "$buffer_pid" "$capture_gateway_pid" "$capture_pid" "$pid"; do
+            for child in "$reference_pid" "$gateway_replay_pid" "$gateway_replay_upstream_pid" "$buffer_pid" "$capture_gateway_pid" "$capture_pid" "$pid"; do
               if [ -n "$child" ]; then
                 kill "$child" 2>/dev/null || true
                 wait "$child" 2>/dev/null || true
@@ -795,6 +796,170 @@ jobs:
           PYLIVEREPLAY
                 fi
               fi
+
+              reference_home="$RUNNER_TEMP/codex-reference-home"
+              reference_request="$RUNNER_TEMP/codex-reference-request.json"
+              reference_response="$RUNNER_TEMP/codex-reference-response.sse"
+              reference_server="$RUNNER_TEMP/codex-reference-server.py"
+              mkdir -p "$reference_home"
+              python3 - "$codex_home/config.toml" "$reference_home/config.toml" <<'PYREFCFG'
+          import sys
+          source, target = sys.argv[1], sys.argv[2]
+          text = open(source, encoding="utf-8").read()
+          text = text.replace('base_url = "http://127.0.0.1:11435/v1"', 'base_url = "http://127.0.0.1:11442/v1"')
+          text = text.replace('env_key = "AGENTINTERPOSER_CLIENT_KEY"', 'env_key = "REFERENCE_CLIENT_KEY"')
+          with open(target, "w", encoding="utf-8") as handle:
+              handle.write(text)
+          PYREFCFG
+
+              cat > "$reference_server" <<'PYREFSERVER'
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          import os
+
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, *_args):
+                  return
+              def do_POST(self):
+                  length = int(self.headers.get("content-length", "0"))
+                  with open(os.environ["REFERENCE_REQUEST"], "wb") as handle:
+                      handle.write(self.rfile.read(length))
+                  payload = b'{"error":{"message":"reference-capture-stop"}}'
+                  self.send_response(500)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(payload)))
+                  self.end_headers()
+                  self.wfile.write(payload)
+          ThreadingHTTPServer(("127.0.0.1", 11442), Handler).serve_forever()
+          PYREFSERVER
+              REFERENCE_REQUEST="$reference_request" python3 "$reference_server" >"$RUNNER_TEMP/codex-reference-server.log" 2>&1 &
+              reference_pid=$!
+              for _ in {1..50}; do
+                if (echo >/dev/tcp/127.0.0.1/11442) >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 0.1
+              done
+
+              set +e
+              CODEX_HOME="$reference_home" \
+                REFERENCE_CLIENT_KEY='reference-client-placeholder' \
+                "$codex" exec \
+                  --ephemeral \
+                  --sandbox read-only \
+                  --ignore-rules \
+                  --json \
+                  "$prompt" >"$RUNNER_TEMP/codex-reference-events.jsonl" 2>"$RUNNER_TEMP/codex-reference-stderr.log"
+              reference_codex_status=$?
+              set -e
+              echo "codex_reference_capture_exit=${reference_codex_status}"
+              for _ in {1..30}; do
+                if [ -s "$reference_request" ]; then
+                  break
+                fi
+                sleep 0.1
+              done
+              kill "$reference_pid" 2>/dev/null || true
+              wait "$reference_pid" 2>/dev/null || true
+              reference_pid=''
+
+              if [ -s "$reference_request" ] && [ -s "$live_request_capture" ]; then
+                python3 - "$live_request_capture" "$reference_request" <<'PYREFDIFF'
+          import json
+          import os
+          import sys
+
+          live_path, reference_path = sys.argv[1:]
+          live = json.load(open(live_path, encoding="utf-8"))
+          reference = json.load(open(reference_path, encoding="utf-8"))
+
+          def shape(value):
+              if isinstance(value, str): return f"string(len={len(value)})"
+              if isinstance(value, list): return f"array(len={len(value)})"
+              if isinstance(value, dict): return f"object(keys={len(value)})"
+              if value is None: return "null"
+              if isinstance(value, bool): return "bool"
+              if isinstance(value, (int, float)): return "number"
+              return type(value).__name__
+
+          def walk(a, b, path="$", out=None):
+              if out is None: out = []
+              if type(a) is not type(b):
+                  out.append((path, "type", shape(a), shape(b)))
+                  return out
+              if isinstance(a, dict):
+                  for key in sorted(set(a) | set(b)):
+                      child = f"{path}.{key}"
+                      if key not in a:
+                          out.append((child, "presence", "missing", shape(b[key])))
+                      elif key not in b:
+                          out.append((child, "presence", shape(a[key]), "missing"))
+                      else:
+                          walk(a[key], b[key], child, out)
+              elif isinstance(a, list):
+                  if len(a) != len(b):
+                      out.append((path, "length", shape(a), shape(b)))
+                  for index, (left, right) in enumerate(zip(a, b)):
+                      walk(left, right, f"{path}[{index}]", out)
+              elif a != b:
+                  out.append((path, "value", shape(a), shape(b)))
+              return out
+
+          differences = walk(live, reference)
+          print("codex_reference_request_bytes=" + str(os.path.getsize(reference_path)))
+          print("codex_live_reference_diff_count=" + str(len(differences)))
+          for path, kind, left, right in differences:
+              print(f"codex_live_reference_diff_path={path} kind={kind} live={left} reference={right}")
+          PYREFDIFF
+
+                set +e
+                reference_http="$(curl --silent --show-error --no-buffer \
+                  --max-time 90 \
+                  --output "$reference_response" \
+                  --write-out '%{http_code}' \
+                  --request POST \
+                  'https://integrate.api.nvidia.com/v1/responses' \
+                  --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
+                  --header 'Content-Type: application/json' \
+                  --data-binary "@$reference_request")"
+                reference_replay_status=$?
+                set -e
+                echo "codex_reference_replay_curl_exit=${reference_replay_status}"
+                echo "codex_reference_replay_http=${reference_http}"
+                if [ "$reference_replay_status" -eq 0 ] && [[ "$reference_http" =~ ^2 ]]; then
+                  python3 - "$reference_response" <<'PYREFOUT'
+          import json
+          import sys
+          events = []
+          completed = False
+          function_call = False
+          for raw in open(sys.argv[1], encoding="utf-8", errors="replace"):
+              line = raw.strip()
+              if not line.startswith("data:"):
+                  continue
+              value = line.split(":", 1)[1].strip()
+              if value == "[DONE]":
+                  continue
+              try:
+                  event = json.loads(value)
+              except Exception:
+                  continue
+              event_type = event.get("type")
+              if event_type and event_type not in events:
+                  events.append(str(event_type))
+              item = event.get("item")
+              if isinstance(item, dict) and item.get("type") == "function_call":
+                  function_call = True
+              if event_type == "response.completed":
+                  completed = True
+          print("codex_reference_replay_events=" + ",".join(events))
+          print("codex_reference_replay_function_call=" + str(function_call).lower())
+          print("codex_reference_replay_completed=" + str(completed).lower())
+          PYREFOUT
+                fi
+              else
+                echo 'codex_reference_request_captured=false'
+              fi
+
               exit "$fresh_status"
             fi
             fresh_actual="$(tr -d '\r\n' < "$fresh_final")"
