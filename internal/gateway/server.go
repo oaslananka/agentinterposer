@@ -67,7 +67,8 @@ func NewHandler(cfg Config) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.handleHealth)
-	mux.HandleFunc("POST /v1/chat/completions", h.handleChatCompletions)
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { h.handleProxy(w, r, "/chat/completions") })
+	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) { h.handleProxy(w, r, "/responses") })
 	return mux, nil
 }
 
@@ -75,7 +76,7 @@ func (h *handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPath string) {
 	if h.upstreamURL == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "upstream is not configured"})
 		return
@@ -101,7 +102,7 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	upstreamResponse, err := h.doUpstream(r, body)
+	upstreamResponse, err := h.doUpstream(r, body, upstreamPath)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
 		return
@@ -145,9 +146,9 @@ func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string)
 	}
 }
 
-func (h *handler) doUpstream(r *http.Request, body []byte) (*http.Response, error) {
+func (h *handler) doUpstream(r *http.Request, body []byte, upstreamPath string) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
-		upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamEndpoint(h.upstreamURL, "/chat/completions"), bytes.NewReader(body))
+		upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamEndpoint(h.upstreamURL, upstreamPath), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
