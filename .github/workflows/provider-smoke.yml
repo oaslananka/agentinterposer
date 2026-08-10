@@ -726,6 +726,7 @@ jobs:
           gateway_log="$RUNNER_TEMP/agentinterposer-claude-code.log"
           claude_output="$RUNNER_TEMP/claude-code-output.json"
           claude_stderr="$RUNNER_TEMP/claude-code-stderr.log"
+          proof_expected="$RUNNER_TEMP/claude-code-proof-expected"
           claude_capture_dir="$RUNNER_TEMP/claude-code-capture"
           claude_proxy="$RUNNER_TEMP/claude-code-capture-proxy.py"
           proxy_pid=''
@@ -740,7 +741,7 @@ jobs:
               wait "$proxy_pid" 2>/dev/null || true
             fi
             rm -rf "$claude_capture_dir"
-            rm -f "$claude_proxy" "$claude_output" "$claude_stderr"
+            rm -f "$claude_proxy" "$claude_output" "$claude_stderr" "$proof_expected"
             if [ -n "$pid" ]; then
               kill "$pid" 2>/dev/null || true
               wait "$pid" 2>/dev/null || true
@@ -852,7 +853,7 @@ jobs:
 
           sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
           sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
-          printf '%s\n' '{"permissions":{"allow":["Bash(pwd)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
+          printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
           sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-code-settings.json" "$claude_settings"
           rm -f "$RUNNER_TEMP/claude-code-settings.json"
           shell_pid=$$
@@ -872,16 +873,25 @@ jobs:
             echo 'Claude Code binary is not executable by the certification user.' >&2
             exit 1
           fi
+          python3 - "$proof_expected" <<'PY'
+          import secrets
+          import sys
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              handle.write(secrets.token_hex(16) + "\n")
+          PY
+          chmod 0600 "$proof_expected"
+          proof="$(cat "$proof_expected")"
           echo 'claude_code_os_user_isolation=ok'
           echo 'claude_code_secret_environment_isolation=ok'
 
-          prompt=$'Use Bash exactly once. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\npwd\nEND_COMMAND\nAfter the command completes, reply with exactly the working-directory path from stdout and no other text.'
+          prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
           set +e
           (
             cd "$claude_home/work"
             sudo -u "$claude_user" env -i \
             HOME="$claude_home" \
             PATH="/usr/local/bin:/usr/bin:/bin" \
+            AGENTINTERPOSER_TOOL_PROOF="$proof" \
             CLAUDE_CONFIG_DIR="$claude_home/.claude" \
             ANTHROPIC_BASE_URL='http://127.0.0.1:11434' \
             ANTHROPIC_AUTH_TOKEN='agentinterposer-local-placeholder' \
@@ -1042,7 +1052,7 @@ jobs:
                   for child in value:
                       yield from walk(child)
 
-          expected = "pwd"
+          expected = "echo $AGENTINTERPOSER_TOOL_PROOF"
           bash_commands = []
           for event in events:
               for obj in walk(event):
@@ -1059,7 +1069,7 @@ jobs:
               print("claude_code_bash_command_exact=" + str(command == expected).lower())
               print("claude_code_bash_command_trimmed_exact=" + str(trimmed == expected).lower())
               print("claude_code_bash_command_starts_expected=" + str(trimmed.startswith(expected)).lower())
-              print("claude_code_bash_command_matches_pwd=" + str(command.strip() == "pwd").lower())
+              print("claude_code_bash_command_matches_proof_env=" + str(command.strip() == "echo $AGENTINTERPOSER_TOOL_PROOF").lower())
               print("claude_code_bash_command_has_newline=" + str("\n" in command or "\r" in command).lower())
               print("claude_code_bash_command_has_pipe=" + str("|" in command).lower())
               print("claude_code_bash_command_has_redirect=" + str(">" in command or "<" in command).lower())
@@ -1075,7 +1085,7 @@ jobs:
               except Exception:
                   tokens = []
               print("claude_code_bash_command_token_count=" + str(len(tokens)))
-              print("claude_code_bash_command_semantic_exact=" + str(tokens == ["pwd"]).lower())
+              print("claude_code_bash_command_semantic_exact=" + str(tokens == ["echo", "$AGENTINTERPOSER_TOOL_PROOF"]).lower())
 
           permission_events = [
               event for event in events
@@ -1132,12 +1142,13 @@ jobs:
             exit 1
           fi
 
-          python3 - "$claude_output" <<'PY'
+          python3 - "$claude_output" "$proof_expected" <<'PY'
           import json
           import re
           import sys
 
-          output_path = sys.argv[1]
+          output_path, proof_path = sys.argv[1:]
+          expected_proof = open(proof_path, encoding="utf-8").read().strip()
           events = []
           for raw in open(output_path, encoding="utf-8", errors="strict"):
               raw = raw.strip()
@@ -1156,7 +1167,7 @@ jobs:
                   for child in value:
                       yield from walk(child)
 
-          command = "pwd"
+          command = "echo $AGENTINTERPOSER_TOOL_PROOF"
           tool_uses = []
           tool_results = []
           for event in events:
@@ -1195,8 +1206,8 @@ jobs:
 
           tool_text = text_content(matching_results[0].get("content"))
           proof = tool_text.strip()
-          if not proof.startswith("/") or "\n" in proof or len(proof) > 4096:
-              raise SystemExit("Claude Code Bash tool_result did not contain one absolute working-directory path")
+          if not re.fullmatch(r"[0-9a-f]{32}", proof, re.I) or proof != expected_proof:
+              raise SystemExit("Claude Code Bash tool_result did not preserve the hidden proof")
 
           result = next((event for event in reversed(events) if event.get("type") == "result"), None)
           if result is None or result.get("subtype") != "success" or result.get("is_error"):
@@ -1206,7 +1217,7 @@ jobs:
               raise SystemExit("Claude Code completed with an unexpected turn count")
           final_text = result.get("result")
           if not isinstance(final_text, str) or final_text.strip() != proof:
-              raise SystemExit("Claude Code final response did not preserve the Bash tool_result path")
+              raise SystemExit("Claude Code final response did not preserve the Bash tool_result proof")
 
           print("claude_code_bash_tool=ok")
           print("claude_code_tool_result_round_trip=ok")
