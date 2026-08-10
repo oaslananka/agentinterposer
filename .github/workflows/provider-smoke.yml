@@ -726,7 +726,7 @@ jobs:
           gateway_log="$RUNNER_TEMP/agentinterposer-claude-code.log"
           claude_output="$RUNNER_TEMP/claude-code-output.json"
           claude_stderr="$RUNNER_TEMP/claude-code-stderr.log"
-          claude_debug="$RUNNER_TEMP/claude-code-debug.log"
+          claude_debug='/tmp/agentinterposer-claude-home/debug.log'
           proof_expected="$RUNNER_TEMP/claude-code-proof-expected"
           claude_capture_dir="$RUNNER_TEMP/claude-code-capture"
           claude_proxy="$RUNNER_TEMP/claude-code-capture-proxy.py"
