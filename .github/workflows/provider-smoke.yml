@@ -1044,13 +1044,10 @@ jobs:
                   self.end_headers()
                   if state["messages"] == 1:
                       time.sleep(20.0)
-                      frames = first_response.split(b"\n\n")
-                      for index, frame in enumerate(frames):
-                          if not frame and index == len(frames) - 1:
-                              continue
-                          self.wfile.write(frame + b"\n\n")
+                      for offset in range(0, len(first_response), 7):
+                          self.wfile.write(first_response[offset:offset + 7])
                           self.wfile.flush()
-                          time.sleep(0.05)
+                          time.sleep(0.002)
                   else:
                       self.wfile.write(body)
                       self.wfile.flush()
@@ -1112,7 +1109,7 @@ jobs:
           import json
           import sys
           data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=prebyte-20s-event-progressive-50ms-exact-prompt")
+          print("claude_code_replay_framing=prebyte-20s-7byte-progressive-exact-prompt")
           print("claude_code_replay_exit=" + str(data.get("exit")))
           print("claude_code_replay_message_requests=" + str(data.get("messages")))
           print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
