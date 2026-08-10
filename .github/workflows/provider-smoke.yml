@@ -1043,6 +1043,7 @@ jobs:
                   self.send_header("Connection", "close")
                   self.end_headers()
                   if state["messages"] == 1:
+                      time.sleep(20.0)
                       frames = first_response.split(b"\n\n")
                       for index, frame in enumerate(frames):
                           if not frame and index == len(frames) - 1:
@@ -1086,7 +1087,7 @@ jobs:
                   cwd=replay_home + "/work",
                   stdout=subprocess.DEVNULL,
                   stderr=subprocess.DEVNULL,
-                  timeout=60,
+                  timeout=90,
               )
           finally:
               server.shutdown()
@@ -1111,7 +1112,7 @@ jobs:
           import json
           import sys
           data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=event-progressive-50ms-exact-prompt")
+          print("claude_code_replay_framing=prebyte-20s-event-progressive-50ms-exact-prompt")
           print("claude_code_replay_exit=" + str(data.get("exit")))
           print("claude_code_replay_message_requests=" + str(data.get("messages")))
           print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
