@@ -16,6 +16,7 @@ on:
         options:
           - baseline
           - full
+          - models
           - messages
           - messages-stream
           - claude-code
@@ -70,6 +71,101 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      - name: Probe Models discovery
+        if: ${{ inputs.scope == 'models' }}
+        id: models
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+        run: |
+          set -euo pipefail
+          direct_body="$RUNNER_TEMP/nvidia-models-direct.json"
+          gateway_body="$RUNNER_TEMP/nvidia-models-gateway.json"
+          binary="$RUNNER_TEMP/agentinterposer-models"
+          gateway_log="$RUNNER_TEMP/agentinterposer-models.log"
+          pid=''
+          cleanup() {
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+            rm -f "$direct_body" "$gateway_body" "$binary" "$gateway_log"
+          }
+          trap cleanup EXIT
+
+          direct_status="$(curl --silent --show-error \
+            --max-time 60 \
+            --output "$direct_body" \
+            --write-out '%{http_code}' \
+            'https://integrate.api.nvidia.com/v1/models' \
+            --header "Authorization: Bearer ${NVIDIA_API_KEY}")"
+          echo "models_direct_http=${direct_status}"
+          if [[ ! "$direct_status" =~ ^2 ]]; then
+            echo 'Hosted models discovery did not return a 2xx response.' >&2
+            exit 1
+          fi
+          python3 - "$direct_body" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          models = data.get("data")
+          if data.get("object") != "list" or not isinstance(models, list):
+              raise SystemExit("Hosted models discovery returned an unexpected schema")
+          if not models:
+              raise SystemExit("Hosted models discovery returned an empty model list")
+          if not all(isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id") for item in models):
+              raise SystemExit("Hosted models discovery returned an invalid model entry")
+          print("models_direct_schema=ok")
+          print("models_direct_count=" + str(len(models)))
+          PY
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$gateway_log" 2>&1 &
+          pid=$!
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for models discovery.' >&2
+            exit 1
+          fi
+
+          gateway_status="$(curl --silent --show-error \
+            --max-time 60 \
+            --output "$gateway_body" \
+            --write-out '%{http_code}' \
+            'http://127.0.0.1:11435/v1/models' \
+            --header 'Authorization: Bearer client-placeholder')"
+          echo "agentinterposer_models_http=${gateway_status}"
+          if [[ ! "$gateway_status" =~ ^2 ]]; then
+            echo 'AgentInterposer models discovery did not return a 2xx response.' >&2
+            exit 1
+          fi
+          python3 - "$gateway_body" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          models = data.get("data")
+          if data.get("object") != "list" or not isinstance(models, list):
+              raise SystemExit("AgentInterposer models discovery returned an unexpected schema")
+          if not models:
+              raise SystemExit("AgentInterposer models discovery returned an empty model list")
+          if not all(isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id") for item in models):
+              raise SystemExit("AgentInterposer models discovery returned an invalid model entry")
+          print("agentinterposer_models_schema=ok")
+          print("agentinterposer_models_count=" + str(len(models)))
+          PY
+          echo 'models_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe Chat Completions
         if: ${{ inputs.scope == 'full' || inputs.scope == 'baseline' }}
@@ -1325,6 +1421,8 @@ jobs:
           MODEL: ${{ inputs.model }}
           SCOPE: ${{ inputs.scope }}
           CHAT_OUTCOME: ${{ steps.chat.outcome }}
+          MODELS_OUTCOME: ${{ steps.models.outcome }}
+          MODELS_VERIFIED: ${{ steps.models.outputs.models_verified }}
           RESPONSES_SUPPORTED: ${{ steps.responses.outputs.responses_supported }}
           MESSAGES_SUPPORTED: ${{ steps.messages.outputs.messages_supported }}
           GATEWAY_OUTCOME: ${{ steps.gateway.outcome }}
@@ -1352,6 +1450,9 @@ jobs:
             elif [ "$SCOPE" = 'claude-code-error' ]; then
               echo "- Claude Code CLI 2.1.226 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code error-result recovery: ${CLAUDE_CODE_ERROR_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'models' ]; then
+              echo "- Models discovery step: ${MODELS_OUTCOME:-not-run}"
+              echo "- Hosted + AgentInterposer models discovery: ${MODELS_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'messages' ]; then

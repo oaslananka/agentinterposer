@@ -67,6 +67,7 @@ func NewHandler(cfg Config) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.handleHealth)
+	mux.HandleFunc("GET /v1/models", h.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { h.handleProxy(w, r, "/chat/completions") })
 	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) { h.handleProxy(w, r, "/responses") })
 	mux.HandleFunc("POST /v1/messages", h.handleMessages)
@@ -75,6 +76,24 @@ func NewHandler(cfg Config) (http.Handler, error) {
 
 func (h *handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	if h.upstreamURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "upstream is not configured"})
+		return
+	}
+
+	select {
+	case h.semaphore <- struct{}{}:
+		defer func() { <-h.semaphore }()
+	case <-r.Context().Done():
+		writeJSON(w, http.StatusRequestTimeout, map[string]string{"error": "request cancelled while waiting for upstream capacity"})
+		return
+	}
+
+	upstreamResponse, err := h.doUpstreamMethod(r, http.MethodGet, nil, "/models")
+	writeUpstreamResponse(w, upstreamResponse, err)
 }
 
 func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPath string) {
@@ -104,17 +123,21 @@ func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	}
 
 	upstreamResponse, err := h.doUpstream(r, body, upstreamPath)
+	writeUpstreamResponse(w, upstreamResponse, err)
+}
+
+func writeUpstreamResponse(w http.ResponseWriter, response *http.Response, err error) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
 		return
 	}
-	defer upstreamResponse.Body.Close()
+	defer response.Body.Close()
 
-	copyHeader(w.Header(), upstreamResponse.Header, "Content-Type")
-	copyHeader(w.Header(), upstreamResponse.Header, "Cache-Control")
-	copyHeader(w.Header(), upstreamResponse.Header, "Retry-After")
-	w.WriteHeader(upstreamResponse.StatusCode)
-	_ = copyResponseBody(w, upstreamResponse.Body, upstreamResponse.Header.Get("Content-Type"))
+	copyHeader(w.Header(), response.Header, "Content-Type")
+	copyHeader(w.Header(), response.Header, "Cache-Control")
+	copyHeader(w.Header(), response.Header, "Retry-After")
+	w.WriteHeader(response.StatusCode)
+	_ = copyResponseBody(w, response.Body, response.Header.Get("Content-Type"))
 }
 
 func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string) error {
@@ -148,12 +171,22 @@ func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string)
 }
 
 func (h *handler) doUpstream(r *http.Request, body []byte, upstreamPath string) (*http.Response, error) {
+	return h.doUpstreamMethod(r, http.MethodPost, body, upstreamPath)
+}
+
+func (h *handler) doUpstreamMethod(r *http.Request, method string, body []byte, upstreamPath string) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
-		upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamEndpoint(h.upstreamURL, upstreamPath), bytes.NewReader(body))
+		var requestBody io.Reader
+		if method == http.MethodPost || len(body) > 0 {
+			requestBody = bytes.NewReader(body)
+		}
+		upstreamRequest, err := http.NewRequestWithContext(r.Context(), method, upstreamEndpoint(h.upstreamURL, upstreamPath), requestBody)
 		if err != nil {
 			return nil, err
 		}
-		upstreamRequest.Header.Set("Content-Type", "application/json")
+		if method == http.MethodPost {
+			upstreamRequest.Header.Set("Content-Type", "application/json")
+		}
 		if h.upstreamBearerToken != "" {
 			upstreamRequest.Header.Set("Authorization", "Bearer "+h.upstreamBearerToken)
 		}
