@@ -159,10 +159,14 @@ func (h *handler) routeResponsesBody(body []byte) []byte {
 	if !responsesInputIsTextOnly(request.Input) {
 		return body
 	}
+	required := []compatibility.Capability{compatibility.CapabilityResponses}
 	if rawJSONHasValues(request.Tools) {
-		return body
+		if !responsesToolsAreCustomFunctions(request.Tools) {
+			return body
+		}
+		required = append(required, compatibility.CapabilityToolCalling)
 	}
-	return h.routeModelBody(body, compatibility.CapabilityResponses)
+	return h.routeModelBody(body, required...)
 }
 
 type responsesRoutingInputItem struct {
@@ -211,6 +215,23 @@ func responsesInputItemIsTextOnly(item responsesRoutingInputItem) bool {
 	}
 	for _, part := range parts {
 		if part.Type != "input_text" {
+			return false
+		}
+	}
+	return true
+}
+
+type responsesRoutingTool struct {
+	Type string `json:"type"`
+}
+
+func responsesToolsAreCustomFunctions(raw json.RawMessage) bool {
+	var tools []responsesRoutingTool
+	if err := json.Unmarshal(raw, &tools); err != nil || len(tools) == 0 {
+		return false
+	}
+	for _, tool := range tools {
+		if tool.Type != "function" {
 			return false
 		}
 	}

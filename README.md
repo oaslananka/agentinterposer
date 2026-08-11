@@ -42,7 +42,7 @@ The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com
 
 AgentInterposer keeps explicit built-in compatibility assertions for model/client combinations that have reproducible certification evidence. The `nvidia/nemotron-3-super-120b-a12b` profile asserts Chat Completions, native Responses, and tool calling, and records the hosted Codex CLI `0.147.0` and Claude Code CLI `2.1.226` certification scenarios described below. Vision input is intentionally not asserted for that model. The separate `meta/llama-3.2-11b-vision-instruct` profile asserts Chat Completions and vision input only, backed by a hosted randomized base64-image read through the Messages adapter; Responses and tool calling remain uncertified for that profile.
 
-Profiles are positive assertions, not guesses: absence of a capability means **uncertified/unknown**, not a universal claim that the provider can never support it. The compatibility layer can conservatively select the first candidate model whose profile asserts every required capability while skipping unknown or incomplete candidates. The opt-in `AGENTINTERPOSER_FALLBACK_MODELS` routing slice can route Anthropic Messages and OpenAI-compatible Chat Completions image requests from a known-but-not-vision-certified requested model to the first same-upstream fallback profile that asserts both Chat Completions and vision input. It can also route text-only Responses requests—either a direct string or structured message content made exclusively of `input_text` parts—when the requested known profile lacks native Responses support and a configured fallback positively asserts `responses`. Unknown requested models are never rewritten. Chat Completions and Responses remain byte-for-byte passthrough when no fallback is selected; routed requests rewrite only the top-level `model` and preserve provider-specific fields. Responses inputs containing `input_image`, `input_file`, non-message items, or tools are intentionally not routed yet.
+Profiles are positive assertions, not guesses: absence of a capability means **uncertified/unknown**, not a universal claim that the provider can never support it. The compatibility layer can conservatively select the first candidate model whose profile asserts every required capability while skipping unknown or incomplete candidates. The opt-in `AGENTINTERPOSER_FALLBACK_MODELS` routing slice can route Anthropic Messages and OpenAI-compatible Chat Completions image requests from a known-but-not-vision-certified requested model to the first same-upstream fallback profile that asserts both Chat Completions and vision input. It can also route text-only Responses requests—either a direct string or structured message content made exclusively of `input_text` parts—when the requested known profile lacks native Responses support and a configured fallback positively asserts `responses`. Unknown requested models are never rewritten. Chat Completions and Responses remain byte-for-byte passthrough when no fallback is selected; routed requests rewrite only the top-level `model` and preserve provider-specific fields. Custom function-tool Responses requests are also eligible when the selected fallback positively asserts both `responses` and `tool_calling`. Responses inputs containing `input_image`, `input_file`, non-message items, or hosted/server tool types remain unrouted.
 
 The built-in registry is also available as secret-free JSON from the CLI, which is useful for scripts and compatibility debugging:
 
@@ -200,7 +200,7 @@ For a non-default gateway location, pass the root URL as the fourth argument, fo
 | `AGENTINTERPOSER_MAX_RETRIES` | `3` | Retries after the initial request |
 | `AGENTINTERPOSER_RETRY_BASE_DELAY` | `500ms` | Base duration for exponential backoff |
 | `AGENTINTERPOSER_MAX_REQUEST_BYTES` | `33554432` | Maximum request body size in bytes |
-| `AGENTINTERPOSER_FALLBACK_MODELS` | none | Ordered comma-separated same-upstream fallback model IDs; used for certified vision routing and text-only Responses fallback |
+| `AGENTINTERPOSER_FALLBACK_MODELS` | none | Ordered comma-separated same-upstream fallback model IDs; used for certified vision, text Responses, and custom function-tool Responses routing |
 
 For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_URL` and `AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN`.
 
@@ -212,7 +212,7 @@ Near-term work is intentionally compatibility-first:
 2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
 4. Expand the model capability registry beyond the current Nemotron 3 Super and Llama 3.2 Vision evidence sets.
-5. Expand the initial same-upstream fallback into multimodal/tool-bearing Responses routing and multi-provider routing.
+5. Expand the initial same-upstream fallback into multimodal/hosted-tool Responses routing and multi-provider routing.
 6. Expand the initial Codex, Claude Code, and OpenCode configuration helpers to compatible VS Code clients.
 
 ## Security
