@@ -18,6 +18,7 @@ on:
           - full
           - messages
           - messages-stream
+          - claude-code
           - codex
 
 permissions:
@@ -672,6 +673,292 @@ jobs:
           PY
           echo 'messages_stream_verified=true' >> "$GITHUB_OUTPUT"
 
+      - name: Install Claude Code certification client
+        if: ${{ inputs.scope == 'claude-code' }}
+        id: claude_install
+        shell: bash
+        run: |
+          set -euo pipefail
+          root='/tmp/agentinterposer-claude-client'
+          cache="$RUNNER_TEMP/claude-npm-cache"
+          expected_integrity='sha512-zDdtV2tzCfngxKXJLj5/UYHtCVa/yA/L0vF5dBx3w1dx5tcA8+AlyRp3qcsd/gYU7hbI/gS5OoA7C8XqJR9YtA=='
+          rm -rf "$root" "$cache"
+          mkdir -p "$root" "$cache"
+          chmod 0755 "$root"
+
+          package="$(cd "$root" && npm --cache "$cache" pack --ignore-scripts --silent @anthropic-ai/claude-code-linux-x64@2.1.226 | tail -1)"
+          package_path="$root/$package"
+          python3 - "$package_path" "$expected_integrity" <<'PY'
+          import base64
+          import hashlib
+          import sys
+
+          path, expected = sys.argv[1:]
+          actual = "sha512-" + base64.b64encode(hashlib.sha512(open(path, "rb").read()).digest()).decode()
+          if actual != expected:
+              raise SystemExit("Claude Code native package integrity mismatch")
+          print("claude_code_package_integrity=ok")
+          PY
+
+          tar -xOf "$package_path" package/claude > "$root/claude"
+          chmod 0755 "$root/claude"
+          rm -f "$package_path"
+          claude_bin="$root/claude"
+          version="$($claude_bin --version)"
+          if [[ "$version" != 2.1.226* ]]; then
+            echo "Unexpected Claude Code version: $version" >&2
+            exit 1
+          fi
+          echo 'claude_code_version=2.1.226'
+          echo "claude_bin=$claude_bin" >> "$GITHUB_OUTPUT"
+
+      - name: Probe Claude Code Messages tool round trip
+        if: ${{ inputs.scope == 'claude-code' }}
+        id: claude_code
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+          CLAUDE_BIN: ${{ steps.claude_install.outputs.claude_bin }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/agentinterposer-claude-code"
+          gateway_log="$RUNNER_TEMP/agentinterposer-claude-code.log"
+          claude_output="$RUNNER_TEMP/claude-code-output.json"
+          claude_stderr="$RUNNER_TEMP/claude-code-stderr.log"
+          proof_expected="$RUNNER_TEMP/claude-code-proof-expected"
+          claude_user='agentinterposer-claude'
+          claude_home='/tmp/agentinterposer-claude-home'
+          claude_settings="$claude_home/settings.json"
+          pid=''
+
+          cleanup() {
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+            if id "$claude_user" >/dev/null 2>&1; then
+              sudo userdel -r "$claude_user" >/dev/null 2>&1 || true
+            fi
+            sudo rm -rf "$claude_home"
+            rm -f "$binary" "$gateway_log" "$claude_output" "$claude_stderr" "$proof_expected"
+          }
+          trap cleanup EXIT
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$gateway_log" 2>&1 &
+          pid=$!
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for the Claude Code probe.' >&2
+            exit 1
+          fi
+
+          if id "$claude_user" >/dev/null 2>&1; then
+            echo 'Dedicated Claude Code certification user unexpectedly already exists.' >&2
+            exit 1
+          fi
+          sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
+          sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
+          printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
+          sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-code-settings.json" "$claude_settings"
+          rm -f "$RUNNER_TEMP/claude-code-settings.json"
+
+          shell_pid=$$
+          if sudo -u "$claude_user" sh -c "cat /proc/$shell_pid/environ >/dev/null 2>&1"; then
+            echo 'Claude Code isolation failed: runner environment is readable.' >&2
+            exit 1
+          fi
+          if sudo -u "$claude_user" sh -c "cat /proc/$pid/environ >/dev/null 2>&1"; then
+            echo 'Claude Code isolation failed: gateway environment is readable.' >&2
+            exit 1
+          fi
+          if sudo -u "$claude_user" sudo -n true >/dev/null 2>&1; then
+            echo 'Claude Code isolation failed: certification user has sudo access.' >&2
+            exit 1
+          fi
+          if ! sudo -u "$claude_user" test -x "$CLAUDE_BIN"; then
+            echo 'Claude Code binary is not executable by the certification user.' >&2
+            exit 1
+          fi
+          if ! sudo -u "$claude_user" sh -c 'cd "$1" && test "$PWD" = "$1"' sh "$claude_home/work"; then
+            echo 'Claude Code certification workdir is not accessible to the probe user.' >&2
+            exit 1
+          fi
+          echo 'claude_code_os_user_isolation=ok'
+          echo 'claude_code_secret_environment_isolation=ok'
+          echo 'claude_code_workdir_access=ok'
+
+          python3 - "$proof_expected" <<'PY'
+          import secrets
+          import sys
+
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              handle.write(secrets.token_hex(16) + "\n")
+          PY
+          chmod 0600 "$proof_expected"
+          proof="$(cat "$proof_expected")"
+
+          prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
+          set +e
+          sudo -u "$claude_user" env -i \
+            HOME="$claude_home" \
+            PATH='/usr/local/bin:/usr/bin:/bin' \
+            AGENTINTERPOSER_TOOL_PROOF="$proof" \
+            CLAUDE_CONFIG_DIR="$claude_home/.claude" \
+            ANTHROPIC_BASE_URL='http://127.0.0.1:11435' \
+            ANTHROPIC_AUTH_TOKEN='agentinterposer-local-placeholder' \
+            ANTHROPIC_MODEL="$MODEL" \
+            CLAUDE_CODE_DISABLE_THINKING='1' \
+            CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS='1' \
+            CLAUDE_CODE_EFFORT_LEVEL='auto' \
+            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1' \
+            CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK='1' \
+            NO_PROXY='127.0.0.1,localhost' \
+            bash -c 'cd "$1" && shift && exec "$@"' bash "$claude_home/work" \
+            timeout 180s "$CLAUDE_BIN" \
+              -p "$prompt" \
+              --bare \
+              --no-session-persistence \
+              --tools 'Bash' \
+              --permission-mode default \
+              --settings "$claude_settings" \
+              --max-turns 3 \
+              --output-format stream-json \
+              --verbose \
+              >"$claude_output" 2>"$claude_stderr"
+          claude_exit=$?
+          set -e
+          echo "claude_code_exit=${claude_exit}"
+
+          python3 - "$claude_output" "$claude_stderr" "$proof_expected" "$claude_exit" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          output_path, stderr_path, proof_path, exit_text = sys.argv[1:]
+          exit_code = int(exit_text)
+          expected_proof = open(proof_path, encoding="utf-8").read().strip()
+          events = []
+          if os.path.exists(output_path):
+              for raw in open(output_path, encoding="utf-8", errors="replace"):
+                  raw = raw.strip()
+                  if not raw:
+                      continue
+                  try:
+                      value = json.loads(raw)
+                  except json.JSONDecodeError:
+                      continue
+                  if isinstance(value, dict):
+                      events.append(value)
+
+          def walk(value):
+              if isinstance(value, dict):
+                  yield value
+                  for child in value.values():
+                      yield from walk(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      yield from walk(child)
+
+          result = next((event for event in reversed(events) if event.get("type") == "result"), None)
+          if exit_code != 0:
+              print("claude_code_failure_event_count=" + str(len(events)))
+              if isinstance(result, dict):
+                  denials = result.get("permission_denials")
+                  if not isinstance(denials, list):
+                      denials = []
+                  print("claude_code_failure_permission_denials=" + str(len(denials)))
+                  status = result.get("api_error_status")
+                  if isinstance(status, int):
+                      print("claude_code_failure_api_status=" + str(status))
+              if os.path.exists(stderr_path) and os.path.getsize(stderr_path):
+                  text = open(stderr_path, encoding="utf-8", errors="replace").read().lower()
+                  labels = []
+                  for needle, label in [
+                      ("permission", "permission"),
+                      ("api error", "api-error"),
+                      ("timeout", "timeout"),
+                      ("connection", "connection"),
+                      ("model", "model"),
+                  ]:
+                      if needle in text and label not in labels:
+                          labels.append(label)
+                  print("claude_code_failure_stderr_classes=" + (",".join(labels) if labels else "other"))
+              raise SystemExit("Claude Code certification client failed")
+
+          command = "echo $AGENTINTERPOSER_TOOL_PROOF"
+          tool_uses = []
+          tool_results = []
+          for event in events:
+              for obj in walk(event):
+                  if obj.get("type") == "tool_use" and obj.get("name") == "Bash":
+                      tool_uses.append(obj)
+                  elif obj.get("type") == "tool_result":
+                      tool_results.append(obj)
+
+          matching_uses = [
+              obj for obj in tool_uses
+              if isinstance(obj.get("input"), dict) and obj["input"].get("command") == command
+          ]
+          if len(matching_uses) != 1:
+              raise SystemExit("Claude Code did not emit exactly one approved Bash tool_use")
+          tool_use_id = matching_uses[0].get("id")
+          if not isinstance(tool_use_id, str) or not tool_use_id:
+              raise SystemExit("Claude Code Bash tool_use has no id")
+
+          matching_results = [obj for obj in tool_results if obj.get("tool_use_id") == tool_use_id]
+          if len(matching_results) != 1:
+              raise SystemExit("Claude Code did not emit exactly one matching tool_result")
+          if matching_results[0].get("is_error") is True:
+              raise SystemExit("Claude Code Bash tool_result reported an error")
+
+          def text_content(value):
+              if isinstance(value, str):
+                  return value
+              if isinstance(value, list):
+                  return "\n".join(
+                      block["text"]
+                      for block in value
+                      if isinstance(block, dict)
+                      and block.get("type") == "text"
+                      and isinstance(block.get("text"), str)
+                  )
+              return ""
+
+          proof = text_content(matching_results[0].get("content")).strip()
+          if not re.fullmatch(r"[0-9a-f]{32}", proof, re.I) or proof != expected_proof:
+              raise SystemExit("Claude Code Bash tool_result did not preserve the hidden proof")
+
+          if not isinstance(result, dict) or result.get("subtype") != "success" or result.get("is_error"):
+              raise SystemExit("Claude Code did not finish with a successful result event")
+          denials = result.get("permission_denials")
+          if denials not in (None, []):
+              raise SystemExit("Claude Code reported a permission denial during certification")
+          turns = result.get("num_turns")
+          if not isinstance(turns, int) or turns < 2 or turns > 3:
+              raise SystemExit("Claude Code completed with an unexpected turn count")
+          final_text = result.get("result")
+          if not isinstance(final_text, str) or final_text.strip() != proof:
+              raise SystemExit("Claude Code final response did not preserve the Bash tool_result proof")
+
+          print("claude_code_bash_tool=ok")
+          print("claude_code_tool_result_round_trip=ok")
+          print("claude_code_messages_streaming=ok")
+          PY
+          echo 'claude_code_verified=true' >> "$GITHUB_OUTPUT"
+
       - name: Probe Codex Responses tool round trip
         if: ${{ inputs.scope == 'codex' }}
         id: codex
@@ -996,6 +1283,8 @@ jobs:
           MESSAGES_ADAPTER_VERIFIED: ${{ steps.messages_gateway.outputs.messages_adapter_verified }}
           MESSAGES_STREAM_OUTCOME: ${{ steps.messages_stream_gateway.outcome }}
           MESSAGES_STREAM_VERIFIED: ${{ steps.messages_stream_gateway.outputs.messages_stream_verified }}
+          CLAUDE_CODE_OUTCOME: ${{ steps.claude_code.outcome }}
+          CLAUDE_CODE_VERIFIED: ${{ steps.claude_code.outputs.claude_code_verified }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
         run: |
@@ -1007,6 +1296,9 @@ jobs:
             if [ "$SCOPE" = 'codex' ]; then
               echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
               echo "- Codex Responses tool round trip: ${CODEX_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'claude-code' ]; then
+              echo "- Claude Code CLI 2.1.226 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
+              echo "- Claude Code Messages tool round trip: ${CLAUDE_CODE_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'messages' ]; then
