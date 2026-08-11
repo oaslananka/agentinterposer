@@ -21,6 +21,7 @@ The project is designed around three principles:
 The first vertical slice supports:
 
 - `GET /healthz`
+- `GET /v1/models` for upstream model discovery
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `POST /v1/messages` for Anthropic-compatible text and custom client-tool requests, including SSE streaming
@@ -41,6 +42,7 @@ The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com
 ```text
 Coding agent / OpenAI-compatible client
                  |
+                 | GET  /v1/models
                  | POST /v1/chat/completions
                  | POST /v1/responses
                  v
@@ -91,6 +93,14 @@ Check health:
 ```bash
 curl http://127.0.0.1:11435/healthz
 ```
+
+List the models exposed by the configured upstream:
+
+```bash
+curl http://127.0.0.1:11435/v1/models
+```
+
+AgentInterposer forwards model discovery through the same bounded retry and server-owned credential boundary as inference requests; client Authorization headers are not forwarded upstream.
 
 Send a Chat Completions request:
 
