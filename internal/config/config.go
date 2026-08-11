@@ -163,8 +163,7 @@ func parseModelRoutes(raw string, getenv func(string) string) ([]ModelRoute, err
 	if err := decoder.Decode(&configured); err != nil {
 		return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES must be a JSON array of model routes: %w", err)
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, errors.New("AGENTINTERPOSER_MODEL_ROUTES must contain exactly one JSON array")
 	}
 
@@ -215,15 +214,20 @@ func validEnvironmentName(name string) bool {
 		return false
 	}
 	for i, r := range name {
-		if i == 0 {
-			if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
-				return false
-			}
-			continue
+		if i == 0 && !environmentNameStart(r) {
+			return false
 		}
-		if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+		if i > 0 && !environmentNamePart(r) {
 			return false
 		}
 	}
 	return true
+}
+
+func environmentNameStart(r rune) bool {
+	return r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
+}
+
+func environmentNamePart(r rune) bool {
+	return environmentNameStart(r) || r >= '0' && r <= '9'
 }
