@@ -93,17 +93,7 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamResponse, err := h.doUpstreamMethod(r, http.MethodGet, nil, "/models")
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
-		return
-	}
-	defer upstreamResponse.Body.Close()
-
-	copyHeader(w.Header(), upstreamResponse.Header, "Content-Type")
-	copyHeader(w.Header(), upstreamResponse.Header, "Cache-Control")
-	copyHeader(w.Header(), upstreamResponse.Header, "Retry-After")
-	w.WriteHeader(upstreamResponse.StatusCode)
-	_ = copyResponseBody(w, upstreamResponse.Body, upstreamResponse.Header.Get("Content-Type"))
+	writeUpstreamResponse(w, upstreamResponse, err)
 }
 
 func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPath string) {
@@ -133,17 +123,21 @@ func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	}
 
 	upstreamResponse, err := h.doUpstream(r, body, upstreamPath)
+	writeUpstreamResponse(w, upstreamResponse, err)
+}
+
+func writeUpstreamResponse(w http.ResponseWriter, response *http.Response, err error) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
 		return
 	}
-	defer upstreamResponse.Body.Close()
+	defer response.Body.Close()
 
-	copyHeader(w.Header(), upstreamResponse.Header, "Content-Type")
-	copyHeader(w.Header(), upstreamResponse.Header, "Cache-Control")
-	copyHeader(w.Header(), upstreamResponse.Header, "Retry-After")
-	w.WriteHeader(upstreamResponse.StatusCode)
-	_ = copyResponseBody(w, upstreamResponse.Body, upstreamResponse.Header.Get("Content-Type"))
+	copyHeader(w.Header(), response.Header, "Content-Type")
+	copyHeader(w.Header(), response.Header, "Cache-Control")
+	copyHeader(w.Header(), response.Header, "Retry-After")
+	w.WriteHeader(response.StatusCode)
+	_ = copyResponseBody(w, response.Body, response.Header.Get("Content-Type"))
 }
 
 func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string) error {
