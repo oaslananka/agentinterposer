@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -57,6 +58,7 @@ type anthropicImageSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
+	URL       string `json:"url"`
 }
 
 type anthropicTool struct {
@@ -476,9 +478,28 @@ func translateAnthropicImage(source *anthropicImageSource) (chatContentPart, err
 	if source == nil {
 		return chatContentPart{}, errors.New("image source is required")
 	}
-	if source.Type != "base64" {
+	switch source.Type {
+	case "base64":
+		return translateAnthropicBase64Image(source)
+	case "url":
+		return translateAnthropicURLImage(source.URL)
+	default:
 		return chatContentPart{}, fmt.Errorf("unsupported image source type %q", source.Type)
 	}
+}
+
+func translateAnthropicURLImage(rawURL string) (chatContentPart, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return chatContentPart{}, errors.New("image URL is required")
+	}
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+		return chatContentPart{}, errors.New("image URL must be an absolute HTTP(S) URL")
+	}
+	return chatContentPart{Type: "image_url", ImageURL: &chatImageURL{URL: rawURL}}, nil
+}
+
+func translateAnthropicBase64Image(source *anthropicImageSource) (chatContentPart, error) {
 	if strings.TrimSpace(source.MediaType) == "" {
 		return chatContentPart{}, errors.New("base64 image media_type is required")
 	}
