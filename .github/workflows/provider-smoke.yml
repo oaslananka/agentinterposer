@@ -970,6 +970,33 @@ jobs:
           print("claude_code_debug_exit_code_1_count=" + str(counts.get("exit-code-1", 0)))
           PY
           if [ -s "$claude_capture_dir/response_1.sse" ]; then
+            original_claude_uid="$(id -u "$claude_user")"
+            sudo userdel -r "$claude_user"
+            sudo rm -rf "$claude_home"
+            sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
+            sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
+            printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-replay-settings.json"
+            sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-replay-settings.json" "$claude_home/settings.json"
+            rm -f "$RUNNER_TEMP/claude-replay-settings.json"
+            replay_claude_uid="$(id -u "$claude_user")"
+            echo "claude_code_replay_uid_reused=$([ "$original_claude_uid" = "$replay_claude_uid" ] && echo true || echo false)"
+            if sudo -u "$claude_user" sh -c "cat /proc/$shell_pid/environ >/dev/null 2>&1"; then
+              echo 'Claude Code replay isolation failed: runner environment is readable.' >&2
+              exit 1
+            fi
+            if sudo -u "$claude_user" sh -c "cat /proc/$pid/environ >/dev/null 2>&1"; then
+              echo 'Claude Code replay isolation failed: gateway environment is readable.' >&2
+              exit 1
+            fi
+            if sudo -u "$claude_user" sudo -n true >/dev/null 2>&1; then
+              echo 'Claude Code replay isolation failed: replay user has sudo access.' >&2
+              exit 1
+            fi
+            if ! sudo -u "$claude_user" test -x "$CLAUDE_BIN"; then
+              echo 'Claude Code replay binary is not executable by the fresh replay user.' >&2
+              exit 1
+            fi
+            echo 'claude_code_replay_fresh_user_isolation=ok'
             replay_home="$claude_home"
             replay_summary="$RUNNER_TEMP/claude-code-replay-summary.json"
             cat > "$claude_replay" <<'PY'
@@ -1166,7 +1193,7 @@ jobs:
           import json
           import sys
           data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=buffered-exact-prompt-same-home-request-compare")
+          print("claude_code_replay_framing=buffered-exact-prompt-fresh-same-home-request-compare")
           print("claude_code_replay_exit=" + str(data.get("exit")))
           print("claude_code_replay_message_requests=" + str(data.get("messages")))
           print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
