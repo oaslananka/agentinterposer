@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -105,5 +106,53 @@ func TestRunConfigCommandIgnoresNonConfigArguments(t *testing.T) {
 	handled, exitCode := runConfigCommand(nil, &stdout, &stderr)
 	if handled || exitCode != 0 {
 		t.Fatalf("runConfigCommand() = handled:%v exit:%d, want not handled", handled, exitCode)
+	}
+}
+
+func TestRunCapabilitiesCommandPrintsCertifiedProfileJSON(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr strings.Builder
+	handled, exitCode := runCapabilitiesCommand(
+		[]string{"capabilities", "nvidia/nemotron-3-super-120b-a12b"},
+		&stdout,
+		&stderr,
+	)
+	if !handled || exitCode != 0 {
+		t.Fatalf("runCapabilitiesCommand() = handled:%v exit:%d stderr:%q", handled, exitCode, stderr.String())
+	}
+	var payload struct {
+		Model          string   `json:"model"`
+		Capabilities   []string `json:"capabilities"`
+		Certifications []struct {
+			Client   string `json:"client"`
+			Version  string `json:"version"`
+			Scenario string `json:"scenario"`
+		} `json:"certifications"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &payload); err != nil {
+		t.Fatalf("decode capabilities JSON: %v; output=%q", err, stdout.String())
+	}
+	if payload.Model != "nvidia/nemotron-3-super-120b-a12b" {
+		t.Fatalf("model = %q", payload.Model)
+	}
+	if len(payload.Capabilities) != 3 {
+		t.Fatalf("capabilities = %#v", payload.Capabilities)
+	}
+	if len(payload.Certifications) != 6 {
+		t.Fatalf("certifications = %#v", payload.Certifications)
+	}
+}
+
+func TestRunCapabilitiesCommandRejectsUnknownModel(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr strings.Builder
+	handled, exitCode := runCapabilitiesCommand([]string{"capabilities", "provider/unknown"}, &stdout, &stderr)
+	if !handled || exitCode != 2 {
+		t.Fatalf("runCapabilitiesCommand() = handled:%v exit:%d", handled, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "no certified capability profile") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

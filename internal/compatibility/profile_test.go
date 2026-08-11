@@ -93,3 +93,22 @@ func TestSelectModelRequiresEveryRequestedCapability(t *testing.T) {
 		t.Fatalf("SelectModel() = %#v, true; want no candidate satisfying every capability", profile)
 	}
 }
+
+func TestProfileCapabilitiesReturnsSortedPositiveAssertions(t *testing.T) {
+	t.Parallel()
+
+	profile, ok := Lookup("nvidia/nemotron-3-super-120b-a12b")
+	if !ok {
+		t.Fatal("missing Nemotron profile")
+	}
+	got := profile.Capabilities()
+	want := []Capability{CapabilityChatCompletions, CapabilityResponses, CapabilityToolCalling}
+	if len(got) != len(want) {
+		t.Fatalf("Capabilities() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Capabilities()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

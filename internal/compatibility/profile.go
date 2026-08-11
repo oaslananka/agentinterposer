@@ -1,5 +1,7 @@
 package compatibility
 
+import "sort"
+
 type Capability string
 
 const (
@@ -15,9 +17,9 @@ const (
 )
 
 type Certification struct {
-	Client   string
-	Version  string
-	Scenario string
+	Client   string `json:"client"`
+	Version  string `json:"version"`
+	Scenario string `json:"scenario"`
 }
 
 type Profile struct {
@@ -28,6 +30,17 @@ type Profile struct {
 
 func (p Profile) Supports(capability Capability) bool {
 	return p.capabilities[capability]
+}
+
+func (p Profile) Capabilities() []Capability {
+	result := make([]Capability, 0, len(p.capabilities))
+	for capability, supported := range p.capabilities {
+		if supported {
+			result = append(result, capability)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
 }
 
 var builtinProfiles = map[string]Profile{
