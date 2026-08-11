@@ -145,9 +145,9 @@ curl --no-buffer http://127.0.0.1:11435/v1/messages \
   }'
 ```
 
-This adapter covers text, custom client `tools`, `tool_choice`, `tool_use`, and successful `tool_result` blocks in non-streaming mode, plus SSE streaming for text and custom client tool calls. In streaming mode, text deltas are forwarded incrementally while tool arguments are buffered until valid JSON is available and then emitted as a single valid `input_json_delta`. The adapter requests terminal usage from the upstream Chat Completions stream; `message_start` begins with zero counters because hosted Chat Completions supplies authoritative token usage at the terminal usage chunk, and the final `message_delta` reports those cumulative counts. `stop_sequences`, image/thinking blocks, server tools, and `tool_result` blocks with `is_error: true` are rejected rather than silently translated. Manual Provider Smoke scopes `messages` and `messages-stream` verify the non-streaming round trip and the real NVIDIA-hosted text/tool SSE paths respectively.
+This adapter covers text, custom client `tools`, `tool_choice`, `tool_use`, and successful `tool_result` blocks in non-streaming mode, plus SSE streaming for text and custom client tool calls. In streaming mode, text deltas are forwarded incrementally while tool arguments are buffered until valid JSON is available and then emitted as a single valid `input_json_delta`. The adapter requests terminal usage from the upstream Chat Completions stream; `message_start` begins with zero counters because hosted Chat Completions supplies authoritative token usage at the terminal usage chunk, and the final `message_delta` reports those cumulative counts. `stop_sequences`, image/thinking blocks, and server tools are rejected rather than silently translated. Failed `tool_result` blocks with `is_error: true` are preserved for the OpenAI-compatible upstream as a versioned AgentInterposer JSON error envelope inside the standard tool-message `content`, because Chat Completions has no separate structured tool-error flag. Manual Provider Smoke scopes `messages` and `messages-stream` verify the non-streaming round trip and the real NVIDIA-hosted text/tool SSE paths respectively.
 
-The manual `scope=claude-code` Provider Smoke profile additionally verifies Claude Code CLI `2.1.226` -> AgentInterposer -> NVIDIA hosted inference -> Bash `tool_use` -> successful `tool_result` -> final response using `nvidia/nemotron-3-super-120b-a12b`. The certification is intentionally limited to this client version, model, and custom Bash-tool flow; broader Claude Code features and other models remain uncertified.
+The manual `scope=claude-code` Provider Smoke profile additionally verifies Claude Code CLI `2.1.226` -> AgentInterposer -> NVIDIA hosted inference -> Bash `tool_use` -> successful `tool_result` -> final response using `nvidia/nemotron-3-super-120b-a12b`. The separate `scope=claude-code-error` profile verifies a failing Bash tool result is preserved, returned through the Messages adapter, and followed by a successful recovery tool turn. The certification is intentionally limited to this client version, model, and custom Bash-tool flow; broader Claude Code features and other models remain uncertified.
 
 ## Configuration
 
@@ -169,7 +169,7 @@ For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_
 Near-term work is intentionally compatibility-first:
 
 1. Broaden Codex/Responses certification beyond the current single-shell-tool Nemotron 3 Super profile to additional tools, agent loops, Codex versions, and models.
-2. Broaden the Anthropic Messages adapter beyond the current text/custom-client-tool slice, including image/thinking and richer error/result semantics.
+2. Broaden the Anthropic Messages adapter beyond the current text/custom-client-tool slice, including image/thinking and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification across additional client versions, models, and parallel/multi-turn tool patterns.
 4. Model capability profiles and compatibility certification tests.
 5. Capability-aware fallback and provider routing.

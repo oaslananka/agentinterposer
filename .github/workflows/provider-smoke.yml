@@ -19,6 +19,7 @@ on:
           - messages
           - messages-stream
           - claude-code
+          - claude-code-error
           - codex
 
 permissions:
@@ -674,7 +675,7 @@ jobs:
           echo 'messages_stream_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Install Claude Code certification client
-        if: ${{ inputs.scope == 'claude-code' }}
+        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-error' }}
         id: claude_install
         shell: bash
         run: |
@@ -713,12 +714,13 @@ jobs:
           echo "claude_bin=$claude_bin" >> "$GITHUB_OUTPUT"
 
       - name: Probe Claude Code Messages tool round trip
-        if: ${{ inputs.scope == 'claude-code' }}
+        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-error' }}
         id: claude_code
         shell: bash
         env:
           NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
+          SCOPE: ${{ inputs.scope }}
           CLAUDE_BIN: ${{ steps.claude_install.outputs.claude_bin }}
         run: |
           set -euo pipefail
@@ -770,7 +772,11 @@ jobs:
           fi
           sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
           sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
-          printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
+          if [ "$SCOPE" = 'claude-code-error' ]; then
+            printf '%s\n' '{"permissions":{"allow":["Bash(false)","Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
+          else
+            printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
+          fi
           sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-code-settings.json" "$claude_settings"
           rm -f "$RUNNER_TEMP/claude-code-settings.json"
 
@@ -809,7 +815,13 @@ jobs:
           chmod 0600 "$proof_expected"
           proof="$(cat "$proof_expected")"
 
-          prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
+          max_turns=3
+          if [ "$SCOPE" = 'claude-code-error' ]; then
+            max_turns=5
+            prompt=$'Use Bash exactly twice and in this exact order. First run the exact command `false`; it must fail. After you receive that failed tool result, recover by running exactly `echo $AGENTINTERPOSER_TOOL_PROOF`. The hidden proof is not present in this prompt. After the second command completes, reply with exactly its stdout and no other text.'
+          else
+            prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
+          fi
           set +e
           sudo -u "$claude_user" env -i \
             HOME="$claude_home" \
@@ -833,7 +845,7 @@ jobs:
               --tools 'Bash' \
               --permission-mode default \
               --settings "$claude_settings" \
-              --max-turns 3 \
+              --max-turns "$max_turns" \
               --output-format stream-json \
               --verbose \
               >"$claude_output" 2>"$claude_stderr"
@@ -841,13 +853,13 @@ jobs:
           set -e
           echo "claude_code_exit=${claude_exit}"
 
-          python3 - "$claude_output" "$claude_stderr" "$proof_expected" "$claude_exit" <<'PY'
+          python3 - "$claude_output" "$claude_stderr" "$proof_expected" "$claude_exit" "$SCOPE" <<'PY'
           import json
           import os
           import re
           import sys
 
-          output_path, stderr_path, proof_path, exit_text = sys.argv[1:]
+          output_path, stderr_path, proof_path, exit_text, scope = sys.argv[1:]
           exit_code = int(exit_text)
           expected_proof = open(proof_path, encoding="utf-8").read().strip()
           events = []
@@ -898,7 +910,8 @@ jobs:
                   print("claude_code_failure_stderr_classes=" + (",".join(labels) if labels else "other"))
               raise SystemExit("Claude Code certification client failed")
 
-          command = "echo $AGENTINTERPOSER_TOOL_PROOF"
+          success_command = "echo $AGENTINTERPOSER_TOOL_PROOF"
+          error_command = "false"
           tool_uses = []
           tool_results = []
           for event in events:
@@ -908,21 +921,20 @@ jobs:
                   elif obj.get("type") == "tool_result":
                       tool_results.append(obj)
 
-          matching_uses = [
-              obj for obj in tool_uses
-              if isinstance(obj.get("input"), dict) and obj["input"].get("command") == command
-          ]
-          if len(matching_uses) != 1:
-              raise SystemExit("Claude Code did not emit exactly one approved Bash tool_use")
-          tool_use_id = matching_uses[0].get("id")
-          if not isinstance(tool_use_id, str) or not tool_use_id:
-              raise SystemExit("Claude Code Bash tool_use has no id")
+          def matching_use(command):
+              return [
+                  obj for obj in tool_uses
+                  if isinstance(obj.get("input"), dict) and obj["input"].get("command") == command
+              ]
 
-          matching_results = [obj for obj in tool_results if obj.get("tool_use_id") == tool_use_id]
-          if len(matching_results) != 1:
-              raise SystemExit("Claude Code did not emit exactly one matching tool_result")
-          if matching_results[0].get("is_error") is True:
-              raise SystemExit("Claude Code Bash tool_result reported an error")
+          def result_for(tool_use):
+              tool_use_id = tool_use.get("id")
+              if not isinstance(tool_use_id, str) or not tool_use_id:
+                  raise SystemExit("Claude Code Bash tool_use has no id")
+              matches = [obj for obj in tool_results if obj.get("tool_use_id") == tool_use_id]
+              if len(matches) != 1:
+                  raise SystemExit("Claude Code did not emit exactly one matching tool_result")
+              return matches[0]
 
           def text_content(value):
               if isinstance(value, str):
@@ -937,9 +949,34 @@ jobs:
                   )
               return ""
 
-          proof = text_content(matching_results[0].get("content")).strip()
+          success_uses = matching_use(success_command)
+          if len(success_uses) != 1:
+              raise SystemExit("Claude Code did not emit exactly one approved successful Bash tool_use")
+          success_result = result_for(success_uses[0])
+          if success_result.get("is_error") is True:
+              raise SystemExit("Claude Code successful Bash tool_result reported an error")
+          proof = text_content(success_result.get("content")).strip()
           if not re.fullmatch(r"[0-9a-f]{32}", proof, re.I) or proof != expected_proof:
               raise SystemExit("Claude Code Bash tool_result did not preserve the hidden proof")
+
+          if scope == "claude-code-error":
+              if len(tool_uses) != 2:
+                  raise SystemExit("Claude Code error recovery emitted an unexpected Bash tool_use count")
+              error_uses = matching_use(error_command)
+              if len(error_uses) != 1:
+                  raise SystemExit("Claude Code did not emit exactly one intentional failing Bash tool_use")
+              error_result = result_for(error_uses[0])
+              if error_result.get("is_error") is not True:
+                  raise SystemExit("Claude Code failing Bash tool_result did not report is_error=true")
+              if not text_content(error_result.get("content")).strip():
+                  raise SystemExit("Claude Code failing Bash tool_result had no error content")
+              error_id = error_uses[0].get("id")
+              success_id = success_uses[0].get("id")
+              ordered_ids = [obj.get("id") for obj in tool_uses if obj.get("id") in (error_id, success_id)]
+              if ordered_ids != [error_id, success_id]:
+                  raise SystemExit("Claude Code did not recover after the failing Bash tool in order")
+          elif len(tool_uses) != 1:
+              raise SystemExit("Claude Code emitted unexpected additional Bash tool_use events")
 
           if not isinstance(result, dict) or result.get("subtype") != "success" or result.get("is_error"):
               raise SystemExit("Claude Code did not finish with a successful result event")
@@ -947,7 +984,12 @@ jobs:
           if denials not in (None, []):
               raise SystemExit("Claude Code reported a permission denial during certification")
           turns = result.get("num_turns")
-          if not isinstance(turns, int) or turns < 2 or turns > 3:
+          if not isinstance(turns, int):
+              raise SystemExit("Claude Code completed without a numeric turn count")
+          if scope == "claude-code-error":
+              if turns < 3 or turns > 5:
+                  raise SystemExit("Claude Code error recovery completed with an unexpected turn count")
+          elif turns < 2 or turns > 3:
               raise SystemExit("Claude Code completed with an unexpected turn count")
           final_text = result.get("result")
           if not isinstance(final_text, str) or final_text.strip() != proof:
@@ -955,9 +997,16 @@ jobs:
 
           print("claude_code_bash_tool=ok")
           print("claude_code_tool_result_round_trip=ok")
+          if scope == "claude-code-error":
+              print("claude_code_error_tool_result=ok")
+              print("claude_code_error_recovery=ok")
           print("claude_code_messages_streaming=ok")
           PY
-          echo 'claude_code_verified=true' >> "$GITHUB_OUTPUT"
+          if [ "$SCOPE" = 'claude-code-error' ]; then
+            echo 'claude_code_error_verified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'claude_code_verified=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Probe Codex Responses tool round trip
         if: ${{ inputs.scope == 'codex' }}
@@ -1285,6 +1334,7 @@ jobs:
           MESSAGES_STREAM_VERIFIED: ${{ steps.messages_stream_gateway.outputs.messages_stream_verified }}
           CLAUDE_CODE_OUTCOME: ${{ steps.claude_code.outcome }}
           CLAUDE_CODE_VERIFIED: ${{ steps.claude_code.outputs.claude_code_verified }}
+          CLAUDE_CODE_ERROR_VERIFIED: ${{ steps.claude_code.outputs.claude_code_error_verified }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
         run: |
@@ -1299,6 +1349,9 @@ jobs:
             elif [ "$SCOPE" = 'claude-code' ]; then
               echo "- Claude Code CLI 2.1.226 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code Messages tool round trip: ${CLAUDE_CODE_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'claude-code-error' ]; then
+              echo "- Claude Code CLI 2.1.226 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
+              echo "- Claude Code error-result recovery: ${CLAUDE_CODE_ERROR_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'messages' ]; then

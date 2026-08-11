@@ -392,12 +392,15 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 			if block.ToolUseID == "" {
 				return nil, nil, errors.New("tool_result requires tool_use_id")
 			}
-			if block.IsError {
-				return nil, nil, errors.New("tool_result is_error=true is not supported by this adapter yet")
-			}
 			content, err := decodeTextContent(block.Content, "tool_result")
 			if err != nil {
 				return nil, nil, err
+			}
+			if block.IsError {
+				content, err = encodeToolResultError(content)
+				if err != nil {
+					return nil, nil, err
+				}
 			}
 			result = append(result, chatMessage{Role: "tool", Content: content, ToolCallID: block.ToolUseID})
 		default:
@@ -408,6 +411,30 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 		result = append(result, chatMessage{Role: "user", Content: text.String()})
 	}
 	return result, toolNames, nil
+}
+
+type agentinterposerToolResultErrorEnvelope struct {
+	ToolResult agentinterposerToolResultError `json:"agentinterposer_tool_result"`
+}
+
+type agentinterposerToolResultError struct {
+	Version int    `json:"version"`
+	IsError bool   `json:"is_error"`
+	Content string `json:"content"`
+}
+
+func encodeToolResultError(content string) (string, error) {
+	encoded, err := json.Marshal(agentinterposerToolResultErrorEnvelope{
+		ToolResult: agentinterposerToolResultError{
+			Version: 1,
+			IsError: true,
+			Content: content,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode tool_result error: %w", err)
+	}
+	return string(encoded), nil
 }
 
 func decodeTextContent(raw json.RawMessage, field string) (string, error) {
