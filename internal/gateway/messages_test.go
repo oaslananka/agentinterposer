@@ -373,6 +373,127 @@ func assertMessageRoleContent(t *testing.T, value any, role, content string) {
 	}
 }
 
+func TestHandlerRoutesKnownUncertifiedVisionModelToCertifiedFallback(t *testing.T) {
+	t.Parallel()
+
+	var gotModel string
+	handler := newMessagesTestHandlerWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		gotModel, _ = body["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-vision-fallback","model":"meta/llama-3.2-11b-vision-instruct","choices":[{"message":{"role":"assistant","content":"LEFT"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1}}`))
+	}), Config{
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"provider/unknown", "meta/llama-3.2-11b-vision-instruct"},
+	})
+
+	response := serveMessages(handler, `{"model":"nvidia/nemotron-3-super-120b-a12b","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"Which side?"}]}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotModel != "meta/llama-3.2-11b-vision-instruct" {
+		t.Fatalf("upstream model = %q, want certified vision fallback", gotModel)
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Model != "meta/llama-3.2-11b-vision-instruct" {
+		t.Fatalf("response model = %q, want actual routed fallback model", body.Model)
+	}
+}
+
+func TestHandlerDoesNotRouteTextMessagesToVisionFallback(t *testing.T) {
+	t.Parallel()
+
+	var gotModel string
+	handler := newMessagesTestHandlerWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		gotModel, _ = body["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-text","model":"nvidia/nemotron-3-super-120b-a12b","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}), Config{
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"meta/llama-3.2-11b-vision-instruct"},
+	})
+
+	response := serveMessages(handler, `{"model":"nvidia/nemotron-3-super-120b-a12b","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotModel != "nvidia/nemotron-3-super-120b-a12b" {
+		t.Fatalf("upstream model = %q, want requested text model", gotModel)
+	}
+}
+
+func TestHandlerDoesNotGuessFallbackForUnknownRequestedModel(t *testing.T) {
+	t.Parallel()
+
+	var gotModel string
+	handler := newMessagesTestHandlerWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		gotModel, _ = body["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-unknown","model":"provider/new-vision-model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1}}`))
+	}), Config{
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"meta/llama-3.2-11b-vision-instruct"},
+	})
+
+	response := serveMessages(handler, `{"model":"provider/new-vision-model","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotModel != "provider/new-vision-model" {
+		t.Fatalf("upstream model = %q, want unknown requested model preserved", gotModel)
+	}
+}
+
+func TestHandlerKeepsCertifiedRequestedVisionModel(t *testing.T) {
+	t.Parallel()
+
+	var gotModel string
+	handler := newMessagesTestHandlerWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		gotModel, _ = body["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-certified","model":"meta/llama-3.2-11b-vision-instruct","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1}}`))
+	}), Config{
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"nvidia/nemotron-3-super-120b-a12b"},
+	})
+
+	response := serveMessages(handler, `{"model":"meta/llama-3.2-11b-vision-instruct","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotModel != "meta/llama-3.2-11b-vision-instruct" {
+		t.Fatalf("upstream model = %q, want requested certified vision model", gotModel)
+	}
+}
+
 func TestHandlerTranslatesAnthropicBase64ImageInputToChatCompletions(t *testing.T) {
 	t.Parallel()
 
@@ -648,15 +769,20 @@ func TestHandlerTranslatesUpstreamRateLimitToAnthropicError(t *testing.T) {
 
 func newMessagesTestHandler(t *testing.T, upstreamHandler http.Handler) http.Handler {
 	t.Helper()
-
-	upstream := httptest.NewServer(upstreamHandler)
-	t.Cleanup(upstream.Close)
-	handler, err := NewHandler(Config{
-		UpstreamURL:         upstream.URL,
+	return newMessagesTestHandlerWithConfig(t, upstreamHandler, Config{
 		UpstreamBearerToken: "server-secret",
 		MaxConcurrent:       1,
 		MaxRequestBytes:     1 << 20,
 	})
+}
+
+func newMessagesTestHandlerWithConfig(t *testing.T, upstreamHandler http.Handler, cfg Config) http.Handler {
+	t.Helper()
+
+	upstream := httptest.NewServer(upstreamHandler)
+	t.Cleanup(upstream.Close)
+	cfg.UpstreamURL = upstream.URL
+	handler, err := NewHandler(cfg)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}

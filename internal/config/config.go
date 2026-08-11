@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -24,6 +25,7 @@ type Config struct {
 	MaxRetries          int
 	RetryBaseDelay      time.Duration
 	MaxRequestBytes     int64
+	FallbackModels      []string
 }
 
 func LoadFromEnv() (Config, error) {
@@ -46,6 +48,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	var err error
+	if cfg.FallbackModels, err = fallbackModels(getenv("AGENTINTERPOSER_FALLBACK_MODELS")); err != nil {
+		return Config{}, err
+	}
 	if cfg.MaxConcurrent, err = positiveInt(getenv("AGENTINTERPOSER_MAX_CONCURRENT"), defaultMaxConcurrent); err != nil {
 		return Config{}, err
 	}
@@ -103,4 +108,26 @@ func positiveInt64(raw string, fallback int64) (int64, error) {
 		return 0, errors.New("AGENTINTERPOSER_MAX_REQUEST_BYTES must be a positive integer")
 	}
 	return value, nil
+}
+
+func fallbackModels(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(raw, ",")
+	models := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		model := strings.TrimSpace(part)
+		if model == "" {
+			return nil, errors.New("AGENTINTERPOSER_FALLBACK_MODELS must be a comma-separated list of non-empty model IDs")
+		}
+		if _, exists := seen[model]; exists {
+			continue
+		}
+		seen[model] = struct{}{}
+		models = append(models, model)
+	}
+	return models, nil
 }

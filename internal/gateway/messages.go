@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/oaslananka/agentinterposer/internal/compatibility"
 )
 
 type anthropicMessagesRequest struct {
@@ -184,6 +186,7 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	translated.Model = h.selectMessagesModel(translated)
 	translatedBody, err := json.Marshal(translated)
 	if err != nil {
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "unable to encode upstream request")
@@ -236,6 +239,46 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, anthropicResponse)
+}
+
+func (h *handler) selectMessagesModel(request chatCompletionRequest) string {
+	requested := request.Model
+	if len(h.fallbackModels) == 0 || !chatRequestHasVisionInput(request) {
+		return requested
+	}
+
+	profile, known := compatibility.Lookup(requested)
+	if !known {
+		return requested
+	}
+	if profile.Supports(compatibility.CapabilityChatCompletions) && profile.Supports(compatibility.CapabilityVisionInput) {
+		return requested
+	}
+
+	fallback, ok := compatibility.SelectModel(
+		h.fallbackModels,
+		compatibility.CapabilityChatCompletions,
+		compatibility.CapabilityVisionInput,
+	)
+	if !ok {
+		return requested
+	}
+	return fallback.Model
+}
+
+func chatRequestHasVisionInput(request chatCompletionRequest) bool {
+	for _, message := range request.Messages {
+		parts, ok := message.Content.([]chatContentPart)
+		if !ok {
+			continue
+		}
+		for _, part := range parts {
+			if part.Type == "image_url" && part.ImageURL != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletionRequest, error) {
