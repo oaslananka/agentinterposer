@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/oaslananka/agentinterposer/internal/compatibility"
 )
 
 const (
@@ -128,8 +130,92 @@ func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
+	if upstreamPath == "/chat/completions" {
+		body = h.routeChatCompletionBody(body)
+	}
+
 	upstreamResponse, err := h.doUpstream(r, body, upstreamPath)
 	writeUpstreamResponse(w, upstreamResponse, err)
+}
+
+type chatRoutingRequest struct {
+	Model    string               `json:"model"`
+	Messages []chatRoutingMessage `json:"messages"`
+}
+
+type chatRoutingMessage struct {
+	Content json.RawMessage `json:"content"`
+}
+
+type chatRoutingContentPart struct {
+	Type string `json:"type"`
+}
+
+func (h *handler) routeChatCompletionBody(body []byte) []byte {
+	if len(h.fallbackModels) == 0 {
+		return body
+	}
+
+	var request chatRoutingRequest
+	if err := json.Unmarshal(body, &request); err != nil || request.Model == "" || !chatRoutingHasVisionInput(request.Messages) {
+		return body
+	}
+	selected := h.selectCertifiedVisionModel(request.Model)
+	if selected == request.Model {
+		return body
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(body, &object); err != nil {
+		return body
+	}
+	model, err := json.Marshal(selected)
+	if err != nil {
+		return body
+	}
+	object["model"] = model
+	routed, err := json.Marshal(object)
+	if err != nil {
+		return body
+	}
+	return routed
+}
+
+func chatRoutingHasVisionInput(messages []chatRoutingMessage) bool {
+	for _, message := range messages {
+		var parts []chatRoutingContentPart
+		if err := json.Unmarshal(message.Content, &parts); err != nil {
+			continue
+		}
+		for _, part := range parts {
+			if part.Type == "image_url" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (h *handler) selectCertifiedVisionModel(requested string) string {
+	if len(h.fallbackModels) == 0 {
+		return requested
+	}
+	profile, known := compatibility.Lookup(requested)
+	if !known {
+		return requested
+	}
+	if profile.Supports(compatibility.CapabilityChatCompletions) && profile.Supports(compatibility.CapabilityVisionInput) {
+		return requested
+	}
+	fallback, ok := compatibility.SelectModel(
+		h.fallbackModels,
+		compatibility.CapabilityChatCompletions,
+		compatibility.CapabilityVisionInput,
+	)
+	if !ok {
+		return requested
+	}
+	return fallback.Model
 }
 
 func writeUpstreamResponse(w http.ResponseWriter, response *http.Response, err error) {

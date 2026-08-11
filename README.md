@@ -42,7 +42,7 @@ The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com
 
 AgentInterposer keeps explicit built-in compatibility assertions for model/client combinations that have reproducible certification evidence. The `nvidia/nemotron-3-super-120b-a12b` profile asserts Chat Completions, native Responses, and tool calling, and records the hosted Codex CLI `0.147.0` and Claude Code CLI `2.1.226` certification scenarios described below. Vision input is intentionally not asserted for that model. The separate `meta/llama-3.2-11b-vision-instruct` profile asserts Chat Completions and vision input only, backed by a hosted randomized base64-image read through the Messages adapter; Responses and tool calling remain uncertified for that profile.
 
-Profiles are positive assertions, not guesses: absence of a capability means **uncertified/unknown**, not a universal claim that the provider can never support it. The compatibility layer can conservatively select the first candidate model whose profile asserts every required capability while skipping unknown or incomplete candidates. As the first opt-in routing slice, `AGENTINTERPOSER_FALLBACK_MODELS` can route Anthropic Messages image requests from a known-but-not-vision-certified requested model to the first same-upstream fallback profile that asserts both Chat Completions and vision input. Unknown requested models and text-only Messages requests are never rewritten by this slice; when a fallback is used, the translated response reports the actual upstream model when the provider supplies it.
+Profiles are positive assertions, not guesses: absence of a capability means **uncertified/unknown**, not a universal claim that the provider can never support it. The compatibility layer can conservatively select the first candidate model whose profile asserts every required capability while skipping unknown or incomplete candidates. As the first opt-in routing slice, `AGENTINTERPOSER_FALLBACK_MODELS` can route Anthropic Messages and OpenAI-compatible Chat Completions image requests from a known-but-not-vision-certified requested model to the first same-upstream fallback profile that asserts both Chat Completions and vision input. Unknown requested models and text-only requests are never rewritten by this slice. Chat Completions remains byte-for-byte passthrough when no fallback is selected; when a fallback is used, only the top-level `model` is rewritten and provider-specific fields are preserved. Responses report the actual upstream model when the provider supplies it.
 
 The built-in registry is also available as secret-free JSON from the CLI, which is useful for scripts and compatibility debugging:
 
@@ -200,7 +200,7 @@ For a non-default gateway location, pass the root URL as the fourth argument, fo
 | `AGENTINTERPOSER_MAX_RETRIES` | `3` | Retries after the initial request |
 | `AGENTINTERPOSER_RETRY_BASE_DELAY` | `500ms` | Base duration for exponential backoff |
 | `AGENTINTERPOSER_MAX_REQUEST_BYTES` | `33554432` | Maximum request body size in bytes |
-| `AGENTINTERPOSER_FALLBACK_MODELS` | none | Ordered comma-separated same-upstream fallback model IDs; currently consulted only for Messages image requests |
+| `AGENTINTERPOSER_FALLBACK_MODELS` | none | Ordered comma-separated same-upstream fallback model IDs; currently consulted for Messages and Chat Completions image requests |
 
 For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_URL` and `AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN`.
 
@@ -212,7 +212,7 @@ Near-term work is intentionally compatibility-first:
 2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
 4. Expand the model capability registry beyond the current Nemotron 3 Super and Llama 3.2 Vision evidence sets.
-5. Expand the initial same-upstream Messages vision fallback into general capability-aware fallback and multi-provider routing.
+5. Expand the initial same-upstream vision fallback into Responses-aware and multi-provider routing.
 6. Expand the initial Codex, Claude Code, and OpenCode configuration helpers to compatible VS Code clients.
 
 ## Security

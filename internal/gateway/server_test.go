@@ -91,6 +91,163 @@ func TestHandlerForwardsChatCompletionWithServerOwnedAuthorization(t *testing.T)
 	}
 }
 
+func TestHandlerRoutesChatVisionToCertifiedFallbackPreservingUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-fallback","model":"meta/llama-3.2-11b-vision-instruct","choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"provider/unknown", "meta/llama-3.2-11b-vision-instruct"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}},{"type":"text","text":"Which side?"}]}],"top_k":17}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got["model"] != "meta/llama-3.2-11b-vision-instruct" {
+		t.Fatalf("upstream model = %#v, want certified vision fallback", got["model"])
+	}
+	if got["top_k"] != float64(17) {
+		t.Fatalf("upstream top_k = %#v, want preserved provider-specific field", got["top_k"])
+	}
+}
+
+func TestHandlerKeepsChatTextBodyExactWithFallbackConfigured(t *testing.T) {
+	t.Parallel()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-text","choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"meta/llama-3.2-11b-vision-instruct"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"user","content":"hi"}],"top_k":17}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want exact passthrough %q", gotBody, body)
+	}
+}
+
+func TestHandlerKeepsUnknownChatVisionModelExact(t *testing.T) {
+	t.Parallel()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-unknown","choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"meta/llama-3.2-11b-vision-instruct"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"provider/new-vision-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want unknown requested model preserved", gotBody)
+	}
+}
+
+func TestHandlerKeepsCertifiedChatVisionModelExact(t *testing.T) {
+	t.Parallel()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-certified","choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"nvidia/nemotron-3-super-120b-a12b"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"meta/llama-3.2-11b-vision-instruct","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want certified requested model exact", gotBody)
+	}
+}
+
 func TestHandlerRetriesTransientCapacityErrors(t *testing.T) {
 	t.Parallel()
 
