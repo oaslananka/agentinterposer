@@ -24,7 +24,6 @@ on:
           - models
           - responses-fallback
           - responses-structured-fallback
-          - responses-tool-fallback
           - messages
           - messages-vision
           - messages-vision-fallback
@@ -329,7 +328,7 @@ jobs:
           fi
 
       - name: Probe AgentInterposer Responses passthrough
-        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' || inputs.scope == 'responses-tool-fallback' }}
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' }}
         id: gateway
         shell: bash
         env:
@@ -354,7 +353,7 @@ jobs:
           trap cleanup EXIT
 
           fallback_models=''
-          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-tool-fallback' ]; then
+          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ]; then
             if [ -z "$FALLBACK_MODEL" ]; then
               echo "$SCOPE requires fallback_model." >&2
               exit 2
@@ -402,26 +401,6 @@ jobs:
                       ],
                   },
               ]
-          elif os.environ["SCOPE"] == "responses-tool-fallback":
-              payload["input"] = "Call the probe function exactly once. Do not answer with normal text."
-              payload["max_output_tokens"] = 128
-              payload["tools"] = [
-                  {
-                      "type": "function",
-                      "name": "probe",
-                      "description": "Return a probe value to the caller.",
-                      "parameters": {
-                          "type": "object",
-                          "properties": {
-                              "value": {"type": "string"},
-                          },
-                          "required": ["value"],
-                          "additionalProperties": False,
-                      },
-                      "strict": True,
-                  },
-              ]
-              payload["tool_choice"] = {"type": "function", "name": "probe"}
           print(json.dumps(payload, separators=(",", ":")))
           PY
           )"
@@ -447,39 +426,13 @@ jobs:
           data = json.load(open(body_path, encoding="utf-8"))
           if data.get("object") != "response" and not isinstance(data.get("output"), list):
               raise SystemExit("AgentInterposer returned an unexpected Responses schema")
-          if scope in {"responses-fallback", "responses-structured-fallback", "responses-tool-fallback"}:
+          if scope in {"responses-fallback", "responses-structured-fallback"}:
               if data.get("model") != fallback_model:
                   raise SystemExit("Responses fallback did not report the configured routed model")
               print("agentinterposer_responses_fallback_model=ok")
-          if scope == "responses-tool-fallback":
-              output = data.get("output")
-              if not isinstance(output, list):
-                  raise SystemExit("Responses tool fallback returned no output list")
-              item_labels = []
-              for item in output:
-                  if not isinstance(item, dict):
-                      item_labels.append("non-object")
-                      continue
-                  item_type = str(item.get("type") or "unknown")
-                  item_name = item.get("name")
-                  item_labels.append(item_type + ((":" + item_name) if isinstance(item_name, str) else ""))
-              print("agentinterposer_responses_output_items=" + ",".join(item_labels))
-              calls = [
-                  item for item in output
-                  if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") == "probe"
-              ]
-              if len(calls) != 1:
-                  raise SystemExit("Responses tool fallback did not emit exactly one probe function_call")
-              arguments = calls[0].get("arguments")
-              if not isinstance(arguments, str):
-                  raise SystemExit("Responses tool fallback function_call has no arguments string")
-              parsed = json.loads(arguments)
-              if not isinstance(parsed, dict) or not isinstance(parsed.get("value"), str):
-                  raise SystemExit("Responses tool fallback function arguments did not match the probe schema")
-              print("agentinterposer_responses_function_tool=ok")
           print("agentinterposer_responses_schema=ok")
           PY
-          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-tool-fallback' ]; then
+          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ]; then
             echo 'responses_fallback_verified=true' >> "$GITHUB_OUTPUT"
           fi
 
@@ -1852,11 +1805,6 @@ jobs:
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
               echo "- AgentInterposer structured Responses fallback step: ${GATEWAY_OUTCOME:-not-run}"
               echo "- Routed input_text Responses request: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
-            elif [ "$SCOPE" = 'responses-tool-fallback' ]; then
-              echo "- Requested model: ${MODEL}"
-              echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
-              echo "- AgentInterposer function-tool Responses fallback step: ${GATEWAY_OUTCOME:-not-run}"
-              echo "- Routed custom function tool request: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'messages' ]; then

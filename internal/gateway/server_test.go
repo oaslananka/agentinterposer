@@ -482,16 +482,18 @@ func TestHandlerRoutesResponsesToCertifiedFallbackPreservingUnknownFields(t *tes
 	}
 }
 
-func TestHandlerRoutesFunctionToolResponsesToCertifiedFallback(t *testing.T) {
+func TestHandlerKeepsToolBearingResponsesRequestExact(t *testing.T) {
 	t.Parallel()
 
-	var got map[string]any
+	var gotBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("decode upstream body: %v", err)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
 		}
+		gotBody = string(body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp_tools","object":"response","model":"nvidia/nemotron-3-super-120b-a12b","output":[]}`))
+		_, _ = w.Write([]byte(`{"id":"resp_tools","object":"response","output":[]}`))
 	}))
 	defer upstream.Close()
 
@@ -506,31 +508,16 @@ func TestHandlerRoutesFunctionToolResponsesToCertifiedFallback(t *testing.T) {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
 
-	body := `{"model":"meta/llama-3.2-11b-vision-instruct","input":"use a tool","tools":[{"type":"function","name":"probe","description":"probe","parameters":{"type":"object","properties":{},"additionalProperties":false},"strict":true}],"tool_choice":{"type":"function","name":"probe"},"metadata":{"probe":"function"},"stream":false}`
+	body := `{"model":"meta/llama-3.2-11b-vision-instruct","input":"use a tool","tools":[{"type":"function","name":"probe","description":"probe","parameters":{"type":"object"}}],"stream":false}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
-	if got["model"] != "nvidia/nemotron-3-super-120b-a12b" {
-		t.Fatalf("upstream model = %#v, want Responses+ToolCalling fallback", got["model"])
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want tool-bearing Responses request exact", gotBody)
 	}
-	tools, ok := got["tools"].([]any)
-	if !ok || len(tools) != 1 {
-		t.Fatalf("upstream tools = %#v, want preserved function tool", got["tools"])
-	}
-	metadata, ok := got["metadata"].(map[string]any)
-	if !ok || metadata["probe"] != "function" {
-		t.Fatalf("upstream metadata = %#v, want preserved metadata", got["metadata"])
-	}
-}
-
-func TestHandlerKeepsHostedToolResponsesRequestExact(t *testing.T) {
-	t.Parallel()
-
-	body := `{"model":"meta/llama-3.2-11b-vision-instruct","input":"search","tools":[{"type":"web_search"}],"stream":false}`
-	assertResponsesFallbackPassthrough(t, body)
 }
 
 func TestHandlerRoutesStructuredTextResponsesToCertifiedFallback(t *testing.T) {
