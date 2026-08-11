@@ -520,18 +520,16 @@ func TestHandlerKeepsToolBearingResponsesRequestExact(t *testing.T) {
 	}
 }
 
-func TestHandlerKeepsStructuredResponsesInputExact(t *testing.T) {
+func TestHandlerRoutesStructuredTextResponsesToCertifiedFallback(t *testing.T) {
 	t.Parallel()
 
-	var gotBody string
+	var got map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read upstream body: %v", err)
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
 		}
-		gotBody = string(body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp_structured","object":"response","output":[]}`))
+		_, _ = w.Write([]byte(`{"id":"resp_structured","object":"response","model":"nvidia/nemotron-3-super-120b-a12b","output":[]}`))
 	}))
 	defer upstream.Close()
 
@@ -546,7 +544,64 @@ func TestHandlerKeepsStructuredResponsesInputExact(t *testing.T) {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
 
-	body := `{"model":"meta/llama-3.2-11b-vision-instruct","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":false}`
+	body := `{"model":"meta/llama-3.2-11b-vision-instruct","input":[{"role":"system","content":[{"type":"input_text","text":"Be concise"}]},{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"metadata":{"probe":"structured"},"stream":false}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got["model"] != "nvidia/nemotron-3-super-120b-a12b" {
+		t.Fatalf("upstream model = %#v, want certified Responses fallback", got["model"])
+	}
+	input, ok := got["input"].([]any)
+	if !ok || len(input) != 2 {
+		t.Fatalf("upstream input = %#v, want preserved structured text input", got["input"])
+	}
+	metadata, ok := got["metadata"].(map[string]any)
+	if !ok || metadata["probe"] != "structured" {
+		t.Fatalf("upstream metadata = %#v, want preserved metadata", got["metadata"])
+	}
+}
+
+func TestHandlerKeepsImageResponsesInputExact(t *testing.T) {
+	t.Parallel()
+
+	assertResponsesFallbackPassthrough(t, `{"model":"meta/llama-3.2-11b-vision-instruct","input":[{"role":"user","content":[{"type":"input_text","text":"describe"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}]}],"stream":false}`)
+}
+
+func TestHandlerKeepsFileResponsesInputExact(t *testing.T) {
+	t.Parallel()
+
+	assertResponsesFallbackPassthrough(t, `{"model":"meta/llama-3.2-11b-vision-instruct","input":[{"role":"user","content":[{"type":"input_file","file_data":"ZmlsZQ==","filename":"probe.txt"}]}],"stream":false}`)
+}
+
+func assertResponsesFallbackPassthrough(t *testing.T, body string) {
+	t.Helper()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(upstreamBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_passthrough","object":"response","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"nvidia/nemotron-3-super-120b-a12b"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -554,7 +609,7 @@ func TestHandlerKeepsStructuredResponsesInputExact(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
 	if gotBody != body {
-		t.Fatalf("upstream body = %q, want structured Responses input exact", gotBody)
+		t.Fatalf("upstream body = %q, want exact passthrough %q", gotBody, body)
 	}
 }
 

@@ -23,6 +23,7 @@ on:
           - full
           - models
           - responses-fallback
+          - responses-structured-fallback
           - messages
           - messages-vision
           - messages-vision-fallback
@@ -327,7 +328,7 @@ jobs:
           fi
 
       - name: Probe AgentInterposer Responses passthrough
-        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' }}
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' }}
         id: gateway
         shell: bash
         env:
@@ -352,9 +353,9 @@ jobs:
           trap cleanup EXIT
 
           fallback_models=''
-          if [ "$SCOPE" = 'responses-fallback' ]; then
+          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ]; then
             if [ -z "$FALLBACK_MODEL" ]; then
-              echo 'responses-fallback requires fallback_model.' >&2
+              echo "$SCOPE requires fallback_model." >&2
               exit 2
             fi
             fallback_models="$FALLBACK_MODEL"
@@ -381,6 +382,29 @@ jobs:
             exit 1
           fi
 
+          request_json="$(python3 - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "model": os.environ["MODEL"],
+              "input": "Reply only with OK",
+              "max_output_tokens": 16,
+              "stream": False,
+          }
+          if os.environ["SCOPE"] == "responses-structured-fallback":
+              payload["input"] = [
+                  {
+                      "role": "user",
+                      "content": [
+                          {"type": "input_text", "text": "Reply only with OK"},
+                      ],
+                  },
+              ]
+          print(json.dumps(payload, separators=(",", ":")))
+          PY
+          )"
+
           status="$(curl --silent --show-error \
             --max-time 120 \
             --output "$body" \
@@ -388,7 +412,7 @@ jobs:
             --request POST \
             'http://127.0.0.1:11435/v1/responses' \
             --header 'Content-Type: application/json' \
-            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "input": "Reply only with OK", "max_output_tokens": 16, "stream": False}))')")"
+            --data "$request_json")"
 
           echo "agentinterposer_responses_http=${status}"
           if [[ ! "$status" =~ ^2 ]]; then
@@ -402,13 +426,13 @@ jobs:
           data = json.load(open(body_path, encoding="utf-8"))
           if data.get("object") != "response" and not isinstance(data.get("output"), list):
               raise SystemExit("AgentInterposer returned an unexpected Responses schema")
-          if scope == "responses-fallback":
+          if scope in {"responses-fallback", "responses-structured-fallback"}:
               if data.get("model") != fallback_model:
                   raise SystemExit("Responses fallback did not report the configured routed model")
               print("agentinterposer_responses_fallback_model=ok")
           print("agentinterposer_responses_schema=ok")
           PY
-          if [ "$SCOPE" = 'responses-fallback' ]; then
+          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ]; then
             echo 'responses_fallback_verified=true' >> "$GITHUB_OUTPUT"
           fi
 
@@ -1776,6 +1800,11 @@ jobs:
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
               echo "- AgentInterposer Responses fallback step: ${GATEWAY_OUTCOME:-not-run}"
               echo "- Routed simple-text Responses request: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'responses-structured-fallback' ]; then
+              echo "- Requested model: ${MODEL}"
+              echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
+              echo "- AgentInterposer structured Responses fallback step: ${GATEWAY_OUTCOME:-not-run}"
+              echo "- Routed input_text Responses request: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'messages' ]; then

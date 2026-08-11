@@ -156,14 +156,65 @@ func (h *handler) routeResponsesBody(body []byte) []byte {
 	if err := json.Unmarshal(body, &request); err != nil || request.Model == "" {
 		return body
 	}
-	var input string
-	if err := json.Unmarshal(request.Input, &input); err != nil {
+	if !responsesInputIsTextOnly(request.Input) {
 		return body
 	}
 	if rawJSONHasValues(request.Tools) {
 		return body
 	}
 	return h.routeModelBody(body, compatibility.CapabilityResponses)
+}
+
+type responsesRoutingInputItem struct {
+	Type    string          `json:"type"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+type responsesRoutingContentPart struct {
+	Type string `json:"type"`
+}
+
+func responsesInputIsTextOnly(raw json.RawMessage) bool {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return true
+	}
+
+	var items []responsesRoutingInputItem
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if !responsesInputItemIsTextOnly(item) {
+			return false
+		}
+	}
+	return true
+}
+
+func responsesInputItemIsTextOnly(item responsesRoutingInputItem) bool {
+	if item.Type != "" && item.Type != "message" {
+		return false
+	}
+	if strings.TrimSpace(item.Role) == "" {
+		return false
+	}
+
+	var text string
+	if json.Unmarshal(item.Content, &text) == nil {
+		return true
+	}
+	var parts []responsesRoutingContentPart
+	if err := json.Unmarshal(item.Content, &parts); err != nil || len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if part.Type != "input_text" {
+			return false
+		}
+	}
+	return true
 }
 
 func rawJSONHasValues(raw json.RawMessage) bool {
