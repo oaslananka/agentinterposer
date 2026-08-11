@@ -130,12 +130,48 @@ func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
-	if upstreamPath == "/chat/completions" {
+	switch upstreamPath {
+	case "/chat/completions":
 		body = h.routeChatCompletionBody(body)
+	case "/responses":
+		body = h.routeResponsesBody(body)
 	}
 
 	upstreamResponse, err := h.doUpstream(r, body, upstreamPath)
 	writeUpstreamResponse(w, upstreamResponse, err)
+}
+
+type responsesRoutingRequest struct {
+	Model string          `json:"model"`
+	Input json.RawMessage `json:"input"`
+	Tools json.RawMessage `json:"tools"`
+}
+
+func (h *handler) routeResponsesBody(body []byte) []byte {
+	if len(h.fallbackModels) == 0 {
+		return body
+	}
+
+	var request responsesRoutingRequest
+	if err := json.Unmarshal(body, &request); err != nil || request.Model == "" {
+		return body
+	}
+	var input string
+	if err := json.Unmarshal(request.Input, &input); err != nil {
+		return body
+	}
+	if rawJSONHasValues(request.Tools) {
+		return body
+	}
+	return h.routeModelBody(body, compatibility.CapabilityResponses)
+}
+
+func rawJSONHasValues(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("[]")) {
+		return false
+	}
+	return true
 }
 
 type chatRoutingRequest struct {
@@ -160,8 +196,22 @@ func (h *handler) routeChatCompletionBody(body []byte) []byte {
 	if err := json.Unmarshal(body, &request); err != nil || request.Model == "" || !chatRoutingHasVisionInput(request.Messages) {
 		return body
 	}
-	selected := h.selectCertifiedVisionModel(request.Model)
-	if selected == request.Model {
+	return h.routeModelBody(body, compatibility.CapabilityChatCompletions, compatibility.CapabilityVisionInput)
+}
+
+func (h *handler) routeModelBody(body []byte, required ...compatibility.Capability) []byte {
+	if len(h.fallbackModels) == 0 {
+		return body
+	}
+
+	var envelope struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Model == "" {
+		return body
+	}
+	selected := h.selectCertifiedModel(envelope.Model, required...)
+	if selected == envelope.Model {
 		return body
 	}
 
@@ -196,7 +246,7 @@ func chatRoutingHasVisionInput(messages []chatRoutingMessage) bool {
 	return false
 }
 
-func (h *handler) selectCertifiedVisionModel(requested string) string {
+func (h *handler) selectCertifiedModel(requested string, required ...compatibility.Capability) string {
 	if len(h.fallbackModels) == 0 {
 		return requested
 	}
@@ -204,18 +254,16 @@ func (h *handler) selectCertifiedVisionModel(requested string) string {
 	if !known {
 		return requested
 	}
-	if profile.Supports(compatibility.CapabilityChatCompletions) && profile.Supports(compatibility.CapabilityVisionInput) {
-		return requested
+	for _, capability := range required {
+		if !profile.Supports(capability) {
+			fallback, ok := compatibility.SelectModel(h.fallbackModels, required...)
+			if !ok {
+				return requested
+			}
+			return fallback.Model
+		}
 	}
-	fallback, ok := compatibility.SelectModel(
-		h.fallbackModels,
-		compatibility.CapabilityChatCompletions,
-		compatibility.CapabilityVisionInput,
-	)
-	if !ok {
-		return requested
-	}
-	return fallback.Model
+	return requested
 }
 
 func writeUpstreamResponse(w http.ResponseWriter, response *http.Response, err error) {

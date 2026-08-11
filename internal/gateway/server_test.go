@@ -441,6 +441,199 @@ func TestHandlerAcceptsUpstreamBaseURLWithV1Suffix(t *testing.T) {
 	}
 }
 
+func TestHandlerRoutesResponsesToCertifiedFallbackPreservingUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_fallback","object":"response","model":"nvidia/nemotron-3-super-120b-a12b","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"provider/unknown", "nvidia/nemotron-3-super-120b-a12b"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"meta/llama-3.2-11b-vision-instruct","input":"Reply OK","metadata":{"probe":"keep"},"stream":false}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got["model"] != "nvidia/nemotron-3-super-120b-a12b" {
+		t.Fatalf("upstream model = %#v, want certified Responses fallback", got["model"])
+	}
+	metadata, ok := got["metadata"].(map[string]any)
+	if !ok || metadata["probe"] != "keep" {
+		t.Fatalf("upstream metadata = %#v, want preserved unknown field", got["metadata"])
+	}
+}
+
+func TestHandlerKeepsToolBearingResponsesRequestExact(t *testing.T) {
+	t.Parallel()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_tools","object":"response","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"nvidia/nemotron-3-super-120b-a12b"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"meta/llama-3.2-11b-vision-instruct","input":"use a tool","tools":[{"type":"function","name":"probe","description":"probe","parameters":{"type":"object"}}],"stream":false}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want tool-bearing Responses request exact", gotBody)
+	}
+}
+
+func TestHandlerKeepsStructuredResponsesInputExact(t *testing.T) {
+	t.Parallel()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_structured","object":"response","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"nvidia/nemotron-3-super-120b-a12b"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"meta/llama-3.2-11b-vision-instruct","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":false}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want structured Responses input exact", gotBody)
+	}
+}
+
+func TestHandlerKeepsUnknownResponsesModelExactWithFallbackConfigured(t *testing.T) {
+	t.Parallel()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_unknown","object":"response","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"nvidia/nemotron-3-super-120b-a12b"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"provider/new-responses-model","input":"hi","stream":false}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want unknown requested model exact", gotBody)
+	}
+}
+
+func TestHandlerKeepsCertifiedResponsesModelExact(t *testing.T) {
+	t.Parallel()
+
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_certified","object":"response","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"meta/llama-3.2-11b-vision-instruct"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"nvidia/nemotron-3-super-120b-a12b","input":"hi","stream":false}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("upstream body = %q, want certified requested model exact", gotBody)
+	}
+}
+
 func TestHandlerForwardsResponsesRequestWithoutTranslation(t *testing.T) {
 	t.Parallel()
 
