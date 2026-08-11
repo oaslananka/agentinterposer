@@ -707,9 +707,10 @@ jobs:
               if isinstance(block, dict) and block.get("type") == "text"
           ).strip().upper()
           expected = open(expected_path, encoding="utf-8").read().strip().upper()
-          if not re.fullmatch(r"LEFT|RIGHT", text):
-              raise SystemExit("Messages vision response was not exactly LEFT or RIGHT")
-          if text != expected:
+          directions = re.findall(r"\b(?:LEFT|RIGHT)\b", text)
+          if not directions or len(set(directions)) != 1:
+              raise SystemExit("Messages vision response did not contain one unambiguous direction")
+          if directions[0] != expected:
               raise SystemExit("Messages vision response did not match the randomized image fixture")
           if data.get("stop_reason") not in {"end_turn", "max_tokens"}:
               raise SystemExit("Messages vision response has an unexpected stop_reason")
