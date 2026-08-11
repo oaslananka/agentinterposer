@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for both a single shell-tool round trip and a dependent two-tool loop, plus Claude Code CLI `2.1.226` over Messages for a real single-tool round trip, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for both a single shell-tool round trip and a dependent two-tool loop, plus Claude Code CLI `2.1.226` over Messages for both a single Bash-tool round trip and a dependent two-tool loop, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -31,7 +31,7 @@ The first vertical slice supports:
 - exponential retry for `429`, `500`, `502`, `503`, and `504` responses
 - incremental flushing for `text/event-stream` responses
 - manual Codex CLI `0.147.0` certification for a Responses shell-tool round trip and a dependent two-tool loop with `nvidia/nemotron-3-super-120b-a12b`
-- manual Claude Code CLI `2.1.226` certification for a Messages Bash-tool round trip with `nvidia/nemotron-3-super-120b-a12b`
+- manual Claude Code CLI `2.1.226` certification for Messages single Bash-tool, dependent two-tool, and error-recovery round trips with `nvidia/nemotron-3-super-120b-a12b`
 - configurable request-size protection (default: `32 MiB`)
 - safe loopback binding by default (`127.0.0.1:11435`)
 
@@ -157,7 +157,7 @@ curl --no-buffer http://127.0.0.1:11435/v1/messages \
 
 This adapter covers text, base64 and URL user image blocks, custom client `tools`, `tool_choice`, `tool_use`, and successful text `tool_result` blocks in non-streaming mode, plus SSE streaming for text and custom client tool calls. In streaming mode, text deltas are forwarded incrementally while tool arguments are buffered until valid JSON is available and then emitted as a single valid `input_json_delta`. The adapter requests terminal usage from the upstream Chat Completions stream; `message_start` begins with zero counters because hosted Chat Completions supplies authoritative token usage at the terminal usage chunk, and the final `message_delta` reports those cumulative counts. `stop_sequences`, Files API image sources, image-bearing tool results, thinking blocks, and server tools are rejected rather than silently translated. Failed `tool_result` blocks with `is_error: true` are preserved for the OpenAI-compatible upstream as a versioned AgentInterposer JSON error envelope inside the standard tool-message `content`, because Chat Completions has no separate structured tool-error flag. Manual Provider Smoke scopes `messages` and `messages-stream` verify the non-streaming round trip and the real NVIDIA-hosted text/tool SSE paths respectively.
 
-The manual `scope=claude-code` Provider Smoke profile additionally verifies Claude Code CLI `2.1.226` -> AgentInterposer -> NVIDIA hosted inference -> Bash `tool_use` -> successful `tool_result` -> final response using `nvidia/nemotron-3-super-120b-a12b`. The separate `scope=claude-code-error` profile verifies a failing Bash tool result is preserved, returned through the Messages adapter, and followed by a successful recovery tool turn. The certification is intentionally limited to this client version, model, and custom Bash-tool flow; broader Claude Code features and other models remain uncertified.
+The manual `scope=claude-code` Provider Smoke profile verifies Claude Code CLI `2.1.226` -> AgentInterposer -> NVIDIA hosted inference -> Bash `tool_use` -> successful `tool_result` -> final response using `nvidia/nemotron-3-super-120b-a12b`. The `scope=claude-code-loop` profile verifies two sequential successful Bash calls where the second exact command embeds the unpredictable proof returned by the first tool and produces its independently verified SHA-256 digest. The separate `scope=claude-code-error` profile verifies a failing Bash tool result is preserved, returned through the Messages adapter, and followed by a successful recovery tool turn. These certifications remain intentionally limited to this client version, model, and custom Bash-tool flows; parallel tool use, broader Claude Code features, and other models remain uncertified.
 
 ## Configuration
 
@@ -180,7 +180,7 @@ Near-term work is intentionally compatibility-first:
 
 1. Broaden Codex/Responses certification beyond the current single-tool and dependent two-tool Nemotron 3 Super profiles to additional tool types, longer agent loops, Codex versions, and models.
 2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
-3. Broaden Claude Code/Messages certification across additional client versions, models, and parallel/multi-turn tool patterns.
+3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
 4. Model capability profiles and compatibility certification tests.
 5. Capability-aware fallback and provider routing.
 6. Agent configuration helpers for Codex, Claude Code, OpenCode, and compatible VS Code clients.
