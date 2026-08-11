@@ -22,6 +22,7 @@ on:
           - claude-code
           - claude-code-error
           - codex
+          - codex-loop
 
 permissions:
   contents: read
@@ -1105,12 +1106,13 @@ jobs:
           fi
 
       - name: Probe Codex Responses tool round trip
-        if: ${{ inputs.scope == 'codex' }}
+        if: ${{ inputs.scope == 'codex' || inputs.scope == 'codex-loop' }}
         id: codex
         shell: bash
         env:
           NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
+          SCOPE: ${{ inputs.scope }}
         run: |
           set -euo pipefail
           if [ "$MODEL" != 'nvidia/nemotron-3-super-120b-a12b' ]; then
@@ -1311,7 +1313,11 @@ jobs:
           fi
           echo 'codex_isolated_launcher=ok'
 
-          prompt='Run exactly one shell command. The executable must be cat and its only argument must be /proc/sys/kernel/random/uuid. Do not add another argument and do not run another command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the value.'
+          if [ "$SCOPE" = 'codex-loop' ]; then
+            prompt='Run exactly two shell commands, sequentially. First run `cat /proc/sys/kernel/random/uuid`. After you receive that command stdout, strip its trailing newline and run a second shell command that computes the SHA-256 hex digest of exactly that UUID value. The second command must derive its input from the first command result; do not guess, reuse a cached value, or skip either tool call. After the second command completes, reply with exactly the 64-character lowercase SHA-256 digest and nothing else.'
+          else
+            prompt='Run exactly one shell command. The executable must be cat and its only argument must be /proc/sys/kernel/random/uuid. Do not add another argument and do not run another command. Then reply with exactly the command stdout and nothing else. Do not guess or infer the value.'
+          fi
           set +e
           timeout --signal=TERM --kill-after=10s 180s \
             sudo -u "$codex_user" -- bash -c "cd \"\$1\" && shift && exec env -i \"\$@\"" bash "$codex_run_dir" \
@@ -1338,12 +1344,13 @@ jobs:
           fi
 
           set +e
-          python3 - "$codex_jsonl" "$final_message" <<'PY'
+          python3 - "$codex_jsonl" "$final_message" "$SCOPE" <<'PY'
+          import hashlib
           import json
           import re
           import sys
 
-          jsonl_path, final_path = sys.argv[1:]
+          jsonl_path, final_path, scope = sys.argv[1:]
           counts = {}
           item_counts = {}
           command_results = []
@@ -1380,25 +1387,41 @@ jobs:
               print(f"codex_command_result_{index}=status:{status},exit:{exit_code},output_bytes:{output_bytes}")
           print("codex_completed_command_count=" + str(len(command_results)))
 
-          if len(command_results) != 1 or len(successful_outputs) != 1:
-              raise SystemExit("Codex did not complete exactly one successful shell command")
+          expected_commands = 2 if scope == "codex-loop" else 1
+          if len(command_results) != expected_commands or len(successful_outputs) != expected_commands:
+              raise SystemExit(f"Codex did not complete exactly {expected_commands} successful shell command(s)")
 
           uuid_pattern = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
           match = uuid_pattern.search(successful_outputs[0])
           tool_uuid = match.group(0) if match else None
           print("codex_tool_output_uuid=" + str(tool_uuid is not None).lower())
           if tool_uuid is None:
-              raise SystemExit("Successful shell command output contained no UUID proof")
+              raise SystemExit("First successful shell command output contained no UUID proof")
 
           try:
               final = open(final_path, encoding="utf-8").read()
           except OSError:
               raise SystemExit("Codex produced no final response file")
-          contains = tool_uuid in final
           print("codex_final_bytes=" + str(len(final.encode("utf-8"))))
-          print("codex_final_contains_tool_uuid=" + str(contains).lower())
-          if not contains:
-              raise SystemExit("Codex final response did not contain the shell command UUID proof")
+
+          if scope == "codex-loop":
+              expected_hash = hashlib.sha256(tool_uuid.encode("utf-8")).hexdigest()
+              hash_pattern = re.compile(r"\b[0-9a-f]{64}\b", re.IGNORECASE)
+              second_match = hash_pattern.search(successful_outputs[1])
+              second_hash = second_match.group(0).lower() if second_match else None
+              hash_matches = second_hash == expected_hash
+              print("codex_loop_hash_matches_first_tool=" + str(hash_matches).lower())
+              if not hash_matches:
+                  raise SystemExit("Second shell command output did not contain the SHA-256 digest of the first tool result")
+              final_matches = final.strip().lower() == expected_hash
+              print("codex_final_matches_expected_hash=" + str(final_matches).lower())
+              if not final_matches:
+                  raise SystemExit("Codex final response did not exactly preserve the second tool's SHA-256 proof")
+          else:
+              contains = tool_uuid in final
+              print("codex_final_contains_tool_uuid=" + str(contains).lower())
+              if not contains:
+                  raise SystemExit("Codex final response did not contain the shell command UUID proof")
           PY
           proof_check_status=$?
           set -e
@@ -1412,7 +1435,12 @@ jobs:
 
           echo 'codex_responses_streaming=ok'
           echo 'codex_function_call_round_trip=ok'
-          echo 'codex_verified=true' >> "$GITHUB_OUTPUT"
+          if [ "$SCOPE" = 'codex-loop' ]; then
+            echo 'codex_dependent_two_tool_loop=ok'
+            echo 'codex_loop_verified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'codex_verified=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Write compatibility summary
         if: ${{ always() }}
@@ -1435,6 +1463,7 @@ jobs:
           CLAUDE_CODE_ERROR_VERIFIED: ${{ steps.claude_code.outputs.claude_code_error_verified }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
+          CODEX_LOOP_VERIFIED: ${{ steps.codex.outputs.codex_loop_verified }}
         run: |
           {
             echo '## NVIDIA hosted compatibility probe'
@@ -1444,6 +1473,9 @@ jobs:
             if [ "$SCOPE" = 'codex' ]; then
               echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
               echo "- Codex Responses tool round trip: ${CODEX_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'codex-loop' ]; then
+              echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
+              echo "- Codex dependent two-tool Responses loop: ${CODEX_LOOP_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'claude-code' ]; then
               echo "- Claude Code CLI 2.1.226 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code Messages tool round trip: ${CLAUDE_CODE_VERIFIED:-not-verified}"
