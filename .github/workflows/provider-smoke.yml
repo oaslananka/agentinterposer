@@ -975,6 +975,7 @@ jobs:
             cat > "$claude_replay" <<'PY'
           import json
           import os
+          import re
           import subprocess
           import sys
           import threading
@@ -1084,6 +1085,63 @@ jobs:
           sections = ["model", "max_tokens", "stream", "messages", "tools", "system", "metadata", "tool_choice"]
           comparison = {name: live_request.get(name) == replay_request.get(name) for name in sections}
           comparison["top_level_keys"] = sorted(live_request) == sorted(replay_request)
+
+          def normalize_dynamic(value):
+              if isinstance(value, dict):
+                  return {key: normalize_dynamic(child) for key, child in value.items()}
+              if isinstance(value, list):
+                  return [normalize_dynamic(child) for child in value]
+              if not isinstance(value, str):
+                  return value
+              value = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "<uuid>", value)
+              value = re.sub(r"\b[0-9a-fA-F]{24,}\b", "<hex>", value)
+              value = re.sub(r"\b[A-Za-z0-9_-]{24,}\b", "<token>", value)
+              value = re.sub(r"\b\d{4}-\d{2}-\d{2}[T ][0-9:.+-]+Z?\b", "<timestamp>", value)
+              return value
+
+          live_system = live_request.get("system") if isinstance(live_request.get("system"), list) else []
+          replay_system = replay_request.get("system") if isinstance(replay_request.get("system"), list) else []
+          system_details = {
+              "live_count": len(live_system),
+              "replay_count": len(replay_system),
+              "normalized_equal": normalize_dynamic(live_system) == normalize_dynamic(replay_system),
+              "blocks": [],
+          }
+          for index in range(min(max(len(live_system), len(replay_system)), 8)):
+              left = live_system[index] if index < len(live_system) and isinstance(live_system[index], dict) else {}
+              right = replay_system[index] if index < len(replay_system) and isinstance(replay_system[index], dict) else {}
+              left_text = left.get("text") if isinstance(left.get("text"), str) else ""
+              right_text = right.get("text") if isinstance(right.get("text"), str) else ""
+              system_details["blocks"].append({
+                  "keys_equal": sorted(left) == sorted(right),
+                  "type_equal": left.get("type") == right.get("type"),
+                  "text_bytes_live": len(left_text.encode("utf-8")),
+                  "text_bytes_replay": len(right_text.encode("utf-8")),
+                  "text_equal": left_text == right_text,
+                  "text_normalized_equal": normalize_dynamic(left_text) == normalize_dynamic(right_text),
+              })
+
+          live_metadata = live_request.get("metadata") if isinstance(live_request.get("metadata"), dict) else {}
+          replay_metadata = replay_request.get("metadata") if isinstance(replay_request.get("metadata"), dict) else {}
+          metadata_details = {
+              "keys_live": sorted(live_metadata),
+              "keys_replay": sorted(replay_metadata),
+              "keys_equal": sorted(live_metadata) == sorted(replay_metadata),
+              "normalized_equal": normalize_dynamic(live_metadata) == normalize_dynamic(replay_metadata),
+              "values": {},
+          }
+          for key in sorted(set(live_metadata) | set(replay_metadata)):
+              left = live_metadata.get(key)
+              right = replay_metadata.get(key)
+              metadata_details["values"][key] = {
+                  "kind_live": type(left).__name__,
+                  "kind_replay": type(right).__name__,
+                  "bytes_live": len(left.encode("utf-8")) if isinstance(left, str) else -1,
+                  "bytes_replay": len(right.encode("utf-8")) if isinstance(right, str) else -1,
+                  "equal": left == right,
+                  "normalized_equal": normalize_dynamic(left) == normalize_dynamic(right),
+              }
+
           with open(summary_path, "w", encoding="utf-8") as handle:
               json.dump({
                   "exit": proc.returncode,
@@ -1091,6 +1149,8 @@ jobs:
                   "is_error": state["is_error"],
                   "content_bytes": state["content_bytes"],
                   "request_comparison": comparison,
+                  "system_details": system_details,
+                  "metadata_details": metadata_details,
               }, handle)
           PY
             python3 "$claude_replay" \
@@ -1114,6 +1174,30 @@ jobs:
           comparison = data.get("request_comparison", {})
           for name in ["top_level_keys", "model", "max_tokens", "stream", "messages", "tools", "system", "metadata", "tool_choice"]:
               print("claude_code_request_equal_" + name + "=" + str(bool(comparison.get(name))).lower())
+          system_details = data.get("system_details", {})
+          print("claude_code_system_block_count_live=" + str(system_details.get("live_count", 0)))
+          print("claude_code_system_block_count_replay=" + str(system_details.get("replay_count", 0)))
+          print("claude_code_system_normalized_equal=" + str(bool(system_details.get("normalized_equal"))).lower())
+          for index, block in enumerate(system_details.get("blocks", [])):
+              print(f"claude_code_system_block_{index}_keys_equal=" + str(bool(block.get("keys_equal"))).lower())
+              print(f"claude_code_system_block_{index}_type_equal=" + str(bool(block.get("type_equal"))).lower())
+              print(f"claude_code_system_block_{index}_text_bytes_live=" + str(block.get("text_bytes_live", -1)))
+              print(f"claude_code_system_block_{index}_text_bytes_replay=" + str(block.get("text_bytes_replay", -1)))
+              print(f"claude_code_system_block_{index}_text_equal=" + str(bool(block.get("text_equal"))).lower())
+              print(f"claude_code_system_block_{index}_text_normalized_equal=" + str(bool(block.get("text_normalized_equal"))).lower())
+          metadata_details = data.get("metadata_details", {})
+          print("claude_code_metadata_keys_live=" + ",".join(metadata_details.get("keys_live", [])))
+          print("claude_code_metadata_keys_replay=" + ",".join(metadata_details.get("keys_replay", [])))
+          print("claude_code_metadata_keys_equal=" + str(bool(metadata_details.get("keys_equal"))).lower())
+          print("claude_code_metadata_normalized_equal=" + str(bool(metadata_details.get("normalized_equal"))).lower())
+          for key, value in sorted(metadata_details.get("values", {}).items()):
+              safe_key = key if key.replace("_", "").isalnum() else "other"
+              print("claude_code_metadata_" + safe_key + "_kind_live=" + str(value.get("kind_live", "unknown")))
+              print("claude_code_metadata_" + safe_key + "_kind_replay=" + str(value.get("kind_replay", "unknown")))
+              print("claude_code_metadata_" + safe_key + "_bytes_live=" + str(value.get("bytes_live", -1)))
+              print("claude_code_metadata_" + safe_key + "_bytes_replay=" + str(value.get("bytes_replay", -1)))
+              print("claude_code_metadata_" + safe_key + "_equal=" + str(bool(value.get("equal"))).lower())
+              print("claude_code_metadata_" + safe_key + "_normalized_equal=" + str(bool(value.get("normalized_equal"))).lower())
           PY
             rm -f "$replay_summary"
           else
