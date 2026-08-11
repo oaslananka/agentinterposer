@@ -25,6 +25,7 @@ on:
           - messages
           - messages-vision
           - messages-vision-fallback
+          - chat-vision-fallback
           - messages-stream
           - claude-code
           - claude-code-error
@@ -579,8 +580,8 @@ jobs:
           PY
           echo 'messages_adapter_verified=true' >> "$GITHUB_OUTPUT"
 
-      - name: Probe AgentInterposer Messages vision adapter
-        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'messages-vision-fallback' }}
+      - name: Probe AgentInterposer vision routing
+        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'messages-vision-fallback' || inputs.scope == 'chat-vision-fallback' }}
         id: messages_vision_gateway
         shell: bash
         env:
@@ -607,9 +608,9 @@ jobs:
           trap cleanup EXIT
 
           fallback_models=''
-          if [ "$SCOPE" = 'messages-vision-fallback' ]; then
+          if [ "$SCOPE" = 'messages-vision-fallback' ] || [ "$SCOPE" = 'chat-vision-fallback' ]; then
             if [ -z "$FALLBACK_MODEL" ]; then
-              echo 'messages-vision-fallback requires fallback_model.' >&2
+              echo "$SCOPE requires fallback_model." >&2
               exit 2
             fi
             fallback_models="$FALLBACK_MODEL"
@@ -635,7 +636,7 @@ jobs:
             exit 1
           fi
 
-          python3 - "$MODEL" "$request" "$expected" <<'PY'
+          python3 - "$MODEL" "$request" "$expected" "$SCOPE" <<'PY'
           import base64
           import binascii
           import json
@@ -644,7 +645,7 @@ jobs:
           import sys
           import zlib
 
-          model, request_path, expected_path = sys.argv[1:]
+          model, request_path, expected_path, scope = sys.argv[1:]
           red_side = secrets.choice(("LEFT", "RIGHT"))
           width, height = 128, 64
           red = bytes((255, 0, 0))
@@ -664,27 +665,41 @@ jobs:
               + chunk(b"IEND", b"")
           )
           image_data = base64.b64encode(png).decode("ascii")
-          payload = {
-              "model": model,
-              "max_tokens": 8,
-              "messages": [{
-                  "role": "user",
-                  "content": [
-                      {
-                          "type": "image",
-                          "source": {
-                              "type": "base64",
-                              "media_type": "image/png",
-                              "data": image_data,
+          prompt = "Which half of the image is red? Reply with exactly LEFT or RIGHT and no other text."
+          if scope == "chat-vision-fallback":
+              payload = {
+                  "model": model,
+                  "max_tokens": 8,
+                  "messages": [{
+                      "role": "user",
+                      "content": [
+                          {"type": "text", "text": prompt},
+                          {
+                              "type": "image_url",
+                              "image_url": {"url": "data:image/png;base64," + image_data},
                           },
-                      },
-                      {
-                          "type": "text",
-                          "text": "Which half of the image is red? Reply with exactly LEFT or RIGHT and no other text.",
-                      },
-                  ],
-              }],
-          }
+                      ],
+                  }],
+              }
+          else:
+              payload = {
+                  "model": model,
+                  "max_tokens": 8,
+                  "messages": [{
+                      "role": "user",
+                      "content": [
+                          {
+                              "type": "image",
+                              "source": {
+                                  "type": "base64",
+                                  "media_type": "image/png",
+                                  "data": image_data,
+                              },
+                          },
+                          {"type": "text", "text": prompt},
+                      ],
+                  }],
+              }
           with open(request_path, "w", encoding="utf-8") as handle:
               json.dump(payload, handle, separators=(",", ":"))
           with open(expected_path, "w", encoding="utf-8") as handle:
@@ -692,12 +707,17 @@ jobs:
           print("agentinterposer_messages_vision_fixture=ok")
           PY
 
+          endpoint='http://127.0.0.1:11435/v1/messages'
+          if [ "$SCOPE" = 'chat-vision-fallback' ]; then
+            endpoint='http://127.0.0.1:11435/v1/chat/completions'
+          fi
+
           status="$(curl --silent --show-error \
             --max-time 180 \
             --output "$response" \
             --write-out '%{http_code}' \
             --request POST \
-            'http://127.0.0.1:11435/v1/messages' \
+            "$endpoint" \
             --header 'Content-Type: application/json' \
             --header 'anthropic-version: 2023-06-01' \
             --data-binary "@$request")"
@@ -714,28 +734,42 @@ jobs:
 
           response_path, expected_path, scope, model, fallback_model = sys.argv[1:]
           data = json.load(open(response_path, encoding="utf-8"))
-          if data.get("type") != "message" or data.get("role") != "assistant":
-              raise SystemExit("Messages vision response has an unexpected envelope")
-          expected_model = fallback_model if scope == "messages-vision-fallback" else model
+          expected_model = fallback_model if scope in {"messages-vision-fallback", "chat-vision-fallback"} else model
           if data.get("model") != expected_model:
-              raise SystemExit("Messages vision response did not report the expected routed model")
-          content = data.get("content")
-          if not isinstance(content, list):
-              raise SystemExit("Messages vision response content is not a list")
-          text = "".join(
-              block.get("text", "")
-              for block in content
-              if isinstance(block, dict) and block.get("type") == "text"
-          ).strip().upper()
+              raise SystemExit("Vision response did not report the expected routed model")
+
+          if scope == "chat-vision-fallback":
+              choices = data.get("choices")
+              if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+                  raise SystemExit("Chat vision response has an unexpected choices envelope")
+              choice = choices[0]
+              message = choice.get("message")
+              if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+                  raise SystemExit("Chat vision response contains no assistant text")
+              text = message["content"].strip().upper()
+              if choice.get("finish_reason") not in {"stop", "length"}:
+                  raise SystemExit("Chat vision response has an unexpected finish_reason")
+          else:
+              if data.get("type") != "message" or data.get("role") != "assistant":
+                  raise SystemExit("Messages vision response has an unexpected envelope")
+              content = data.get("content")
+              if not isinstance(content, list):
+                  raise SystemExit("Messages vision response content is not a list")
+              text = "".join(
+                  block.get("text", "")
+                  for block in content
+                  if isinstance(block, dict) and block.get("type") == "text"
+              ).strip().upper()
+              if data.get("stop_reason") not in {"end_turn", "max_tokens"}:
+                  raise SystemExit("Messages vision response has an unexpected stop_reason")
+
           expected = open(expected_path, encoding="utf-8").read().strip().upper()
           directions = re.findall(r"\b(?:LEFT|RIGHT)\b", text)
           if not directions or len(set(directions)) != 1:
-              raise SystemExit("Messages vision response did not contain one unambiguous direction")
+              raise SystemExit("Vision response did not contain one unambiguous direction")
           if directions[0] != expected:
-              raise SystemExit("Messages vision response did not match the randomized image fixture")
-          if data.get("stop_reason") not in {"end_turn", "max_tokens"}:
-              raise SystemExit("Messages vision response has an unexpected stop_reason")
-          print("agentinterposer_messages_vision_image_read=ok")
+              raise SystemExit("Vision response did not match the randomized image fixture")
+          print("agentinterposer_vision_image_read=ok")
           print("messages_vision_verified=true")
           PY
           echo 'messages_vision_verified=true' >> "$GITHUB_OUTPUT"
@@ -1728,6 +1762,11 @@ jobs:
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
               echo "- AgentInterposer Messages vision fallback step: ${MESSAGES_VISION_OUTCOME:-not-run}"
               echo "- Routed randomized base64 image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'chat-vision-fallback' ]; then
+              echo "- Requested model: ${MODEL}"
+              echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
+              echo "- AgentInterposer Chat Completions vision fallback step: ${MESSAGES_VISION_OUTCOME:-not-run}"
+              echo "- Routed randomized image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'messages-stream' ]; then
               echo "- AgentInterposer Messages streaming step: ${MESSAGES_STREAM_OUTCOME:-not-run}"
               echo "- Messages text + tool SSE: ${MESSAGES_STREAM_VERIFIED:-not-verified}"
