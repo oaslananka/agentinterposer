@@ -727,22 +727,12 @@ jobs:
           claude_output="$RUNNER_TEMP/claude-code-output.json"
           claude_stderr="$RUNNER_TEMP/claude-code-stderr.log"
           proof_expected="$RUNNER_TEMP/claude-code-proof-expected"
-          claude_capture_dir="$RUNNER_TEMP/claude-code-capture"
-          claude_proxy="$RUNNER_TEMP/claude-code-capture-proxy.py"
-          claude_replay="$RUNNER_TEMP/claude-code-replay.py"
-          proxy_pid=''
           claude_user='agentinterposer-claude'
           claude_home='/tmp/agentinterposer-claude-home'
-          claude_settings='/tmp/agentinterposer-claude-home/settings.json'
+          claude_settings="$claude_home/settings.json"
           pid=''
 
           cleanup() {
-            if [ -n "$proxy_pid" ]; then
-              kill "$proxy_pid" 2>/dev/null || true
-              wait "$proxy_pid" 2>/dev/null || true
-            fi
-            rm -rf "$claude_capture_dir"
-            rm -f "$claude_proxy" "$claude_replay" "$claude_output" "$claude_stderr" "$proof_expected"
             if [ -n "$pid" ]; then
               kill "$pid" 2>/dev/null || true
               wait "$pid" 2>/dev/null || true
@@ -750,7 +740,8 @@ jobs:
             if id "$claude_user" >/dev/null 2>&1; then
               sudo userdel -r "$claude_user" >/dev/null 2>&1 || true
             fi
-            rm -rf "$claude_home"
+            sudo rm -rf "$claude_home"
+            rm -f "$binary" "$gateway_log" "$claude_output" "$claude_stderr" "$proof_expected"
           }
           trap cleanup EXIT
 
@@ -773,94 +764,16 @@ jobs:
             exit 1
           fi
 
-          rm -rf "$claude_capture_dir"
-          mkdir -p "$claude_capture_dir"
-          cat > "$claude_proxy" <<'PY'
-          import http.client
-          import os
-          import threading
-          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-          capture_dir = os.environ["CLAUDE_CAPTURE_DIR"]
-          lock = threading.Lock()
-          request_count = 0
-
-          class Handler(BaseHTTPRequestHandler):
-              protocol_version = "HTTP/1.0"
-
-              def do_POST(self):
-                  global request_count
-                  length = int(self.headers.get("Content-Length", "0"))
-                  body = self.rfile.read(length)
-                  with lock:
-                      request_count += 1
-                      index = request_count
-                  request_path = os.path.join(capture_dir, f"request_{index}.json")
-                  status_path = os.path.join(capture_dir, f"response_{index}.status")
-                  response_body_path = os.path.join(capture_dir, f"response_{index}.sse")
-                  with open(request_path, "wb") as handle:
-                      handle.write(body)
-
-                  headers = {}
-                  for name in ("Content-Type", "anthropic-version", "anthropic-beta", "Authorization"):
-                      value = self.headers.get(name)
-                      if value:
-                          headers[name] = value
-                  connection = http.client.HTTPConnection("127.0.0.1", 11435, timeout=180)
-                  try:
-                      connection.request("POST", self.path, body=body, headers=headers)
-                      response = connection.getresponse()
-                      with open(status_path, "w", encoding="utf-8") as handle:
-                          handle.write(str(response.status))
-                      self.send_response(response.status)
-                      for name in ("Content-Type", "Cache-Control", "Retry-After"):
-                          value = response.getheader(name)
-                          if value:
-                              self.send_header(name, value)
-                      self.send_header("Connection", "close")
-                      self.end_headers()
-                      with open(response_body_path, "wb") as captured:
-                          while True:
-                              chunk = response.read(4096)
-                              if not chunk:
-                                  break
-                              captured.write(chunk)
-                              captured.flush()
-                              self.wfile.write(chunk)
-                              self.wfile.flush()
-                  finally:
-                      connection.close()
-
-              def log_message(self, *_):
-                  pass
-
-          ThreadingHTTPServer(("127.0.0.1", 11434), Handler).serve_forever()
-          PY
-          CLAUDE_CAPTURE_DIR="$claude_capture_dir" python3 "$claude_proxy" &
-          proxy_pid=$!
-          proxy_ready=false
-          for _ in {1..30}; do
-            if python3 - <<'PY' >/dev/null 2>&1
-          import socket
-          sock = socket.create_connection(("127.0.0.1", 11434), 0.2)
-          sock.close()
-          PY
-            then
-              proxy_ready=true
-              break
-            fi
-            sleep 0.2
-          done
-          if [ "$proxy_ready" != true ]; then
-            echo 'Claude Code capture proxy did not become ready.' >&2
+          if id "$claude_user" >/dev/null 2>&1; then
+            echo 'Dedicated Claude Code certification user unexpectedly already exists.' >&2
             exit 1
           fi
-
           sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
           sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
           printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
           sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-code-settings.json" "$claude_settings"
           rm -f "$RUNNER_TEMP/claude-code-settings.json"
+
           shell_pid=$$
           if sudo -u "$claude_user" sh -c "cat /proc/$shell_pid/environ >/dev/null 2>&1"; then
             echo 'Claude Code isolation failed: runner environment is readable.' >&2
@@ -878,41 +791,32 @@ jobs:
             echo 'Claude Code binary is not executable by the certification user.' >&2
             exit 1
           fi
+          if ! sudo -u "$claude_user" sh -c 'cd "$1" && test "$PWD" = "$1"' sh "$claude_home/work"; then
+            echo 'Claude Code certification workdir is not accessible to the probe user.' >&2
+            exit 1
+          fi
+          echo 'claude_code_os_user_isolation=ok'
+          echo 'claude_code_secret_environment_isolation=ok'
+          echo 'claude_code_workdir_access=ok'
+
           python3 - "$proof_expected" <<'PY'
           import secrets
           import sys
+
           with open(sys.argv[1], "w", encoding="utf-8") as handle:
               handle.write(secrets.token_hex(16) + "\n")
           PY
           chmod 0600 "$proof_expected"
           proof="$(cat "$proof_expected")"
-          if ! sudo -u "$claude_user" env -i \
-            HOME="$claude_home" \
-            PATH='/usr/local/bin:/usr/bin:/bin' \
-            CLAUDE_CODE_SHELL='/bin/bash' \
-            AGENTINTERPOSER_TOOL_PROOF="$proof" \
-            /bin/bash -lc 'test "$AGENTINTERPOSER_TOOL_PROOF" = "$1"' bash "$proof"; then
-            echo 'Claude Code certification shell preflight failed.' >&2
-            exit 1
-          fi
-          echo 'claude_code_shell_preflight=ok'
-          echo 'claude_code_os_user_isolation=ok'
-          echo 'claude_code_secret_environment_isolation=ok'
 
           prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
-          if ! sudo -u "$claude_user" sh -c 'cd "$1" && test "$PWD" = "$1"' sh "$claude_home/work"; then
-            echo 'Claude Code certification workdir is not accessible to the probe user.' >&2
-            exit 1
-          fi
-          echo 'claude_code_workdir_access=ok'
           set +e
           sudo -u "$claude_user" env -i \
             HOME="$claude_home" \
-            PATH="/usr/local/bin:/usr/bin:/bin" \
-            CLAUDE_CODE_SHELL='/bin/bash' \
+            PATH='/usr/local/bin:/usr/bin:/bin' \
             AGENTINTERPOSER_TOOL_PROOF="$proof" \
             CLAUDE_CONFIG_DIR="$claude_home/.claude" \
-            ANTHROPIC_BASE_URL='http://127.0.0.1:11434' \
+            ANTHROPIC_BASE_URL='http://127.0.0.1:11435' \
             ANTHROPIC_AUTH_TOKEN='agentinterposer-local-placeholder' \
             ANTHROPIC_MODEL="$MODEL" \
             CLAUDE_CODE_DISABLE_THINKING='1' \
@@ -932,433 +836,32 @@ jobs:
               --max-turns 3 \
               --output-format stream-json \
               --verbose \
-              --debug \
-              --debug-file "$claude_home/debug.log" \
               >"$claude_output" 2>"$claude_stderr"
           claude_exit=$?
           set -e
           echo "claude_code_exit=${claude_exit}"
-          python3 - "$claude_home/debug.log" <<'PY'
-          import os
-          import sys
 
-          path = sys.argv[1]
-          text = open(path, encoding="utf-8", errors="replace").read().lower() if os.path.exists(path) else ""
-          patterns = [
-              ("creating shell snapshot", "snapshot-start"),
-              ("shell snapshot created successfully", "snapshot-success"),
-              ("shell snapshot creation failed", "snapshot-failed"),
-              ("failed to create shell snapshot", "snapshot-failed"),
-              ("shell config file not found", "shell-config-missing"),
-              ("bash tool", "bash-tool"),
-              ("bashtool", "bash-tool"),
-              ("exit code 1", "exit-code-1"),
-              ("enoent", "enoent"),
-              ("eacces", "eacces"),
-              ("permission denied", "permission"),
-              ("operation not permitted", "operation-not-permitted"),
-              ("spawn", "spawn"),
-              ("shell snapshot", "snapshot-any"),
-          ]
-          counts = {}
-          for needle, label in patterns:
-              counts[label] = counts.get(label, 0) + text.count(needle)
-          active = [label for label, count in counts.items() if count]
-          print("claude_code_debug_bytes=" + str(len(text.encode("utf-8"))))
-          print("claude_code_debug_classes=" + ("+".join(active) if active else "none"))
-          print("claude_code_debug_snapshot_start_count=" + str(counts.get("snapshot-start", 0)))
-          print("claude_code_debug_snapshot_success_count=" + str(counts.get("snapshot-success", 0)))
-          print("claude_code_debug_snapshot_failed_count=" + str(counts.get("snapshot-failed", 0)))
-          print("claude_code_debug_shell_config_missing_count=" + str(counts.get("shell-config-missing", 0)))
-          print("claude_code_debug_exit_code_1_count=" + str(counts.get("exit-code-1", 0)))
-          PY
-          if [ -s "$claude_capture_dir/response_1.sse" ]; then
-            original_claude_uid="$(id -u "$claude_user")"
-            sudo userdel -r "$claude_user"
-            sudo rm -rf "$claude_home"
-            sudo useradd --create-home --home-dir "$claude_home" --shell /bin/bash "$claude_user"
-            sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
-            printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-replay-settings.json"
-            sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-replay-settings.json" "$claude_home/settings.json"
-            rm -f "$RUNNER_TEMP/claude-replay-settings.json"
-            replay_claude_uid="$(id -u "$claude_user")"
-            echo "claude_code_replay_uid_reused=$([ "$original_claude_uid" = "$replay_claude_uid" ] && echo true || echo false)"
-            if sudo -u "$claude_user" sh -c "cat /proc/$shell_pid/environ >/dev/null 2>&1"; then
-              echo 'Claude Code replay isolation failed: runner environment is readable.' >&2
-              exit 1
-            fi
-            if sudo -u "$claude_user" sh -c "cat /proc/$pid/environ >/dev/null 2>&1"; then
-              echo 'Claude Code replay isolation failed: gateway environment is readable.' >&2
-              exit 1
-            fi
-            if sudo -u "$claude_user" sudo -n true >/dev/null 2>&1; then
-              echo 'Claude Code replay isolation failed: replay user has sudo access.' >&2
-              exit 1
-            fi
-            if ! sudo -u "$claude_user" test -x "$CLAUDE_BIN"; then
-              echo 'Claude Code replay binary is not executable by the fresh replay user.' >&2
-              exit 1
-            fi
-            echo 'claude_code_replay_fresh_user_isolation=ok'
-            replay_home="$claude_home"
-            replay_summary="$RUNNER_TEMP/claude-code-replay-summary.json"
-            cat > "$claude_replay" <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          import sys
-          import threading
-          from http.server import BaseHTTPRequestHandler, HTTPServer
-
-          response_path, summary_path, claude_bin, claude_user, replay_home, model, proof, prompt = sys.argv[1:]
-          first_response = open(response_path, "rb").read()
-          state = {"messages": 0, "is_error": None, "content_bytes": None, "first_request": None}
-
-          def final_stream():
-              events = [
-                  ("message_start", {"type":"message_start","message":{"id":"msg_replay_final","type":"message","role":"assistant","content":[],"model":model,"stop_reason":None,"stop_sequence":None,"usage":{"input_tokens":1,"output_tokens":0}}}),
-                  ("content_block_start", {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-                  ("content_block_delta", {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}),
-                  ("content_block_stop", {"type":"content_block_stop","index":0}),
-                  ("message_delta", {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":None},"usage":{"input_tokens":1,"output_tokens":1}}),
-                  ("message_stop", {"type":"message_stop"}),
-              ]
-              return "".join(
-                  f"event: {name}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
-                  for name, data in events
-              ).encode()
-
-          class Handler(BaseHTTPRequestHandler):
-              protocol_version = "HTTP/1.0"
-
-              def log_message(self, *_):
-                  pass
-
-              def do_POST(self):
-                  length = int(self.headers.get("Content-Length", "0"))
-                  data = json.loads(self.rfile.read(length))
-                  if self.path.startswith("/v1/messages/count_tokens"):
-                      body = json.dumps({"input_tokens": 1}).encode()
-                      self.send_response(200)
-                      self.send_header("Content-Type", "application/json")
-                      self.send_header("Content-Length", str(len(body)))
-                      self.end_headers()
-                      self.wfile.write(body)
-                      return
-
-                  state["messages"] += 1
-                  if state["messages"] == 1:
-                      state["first_request"] = data
-                      body = first_response
-                  else:
-                      results = []
-                      for message in data.get("messages", []):
-                          content = message.get("content") if isinstance(message, dict) else None
-                          if isinstance(content, list):
-                              results.extend(block for block in content if isinstance(block, dict) and block.get("type") == "tool_result")
-                      if results:
-                          result = results[-1]
-                          content = result.get("content")
-                          state["is_error"] = bool(result.get("is_error"))
-                          state["content_bytes"] = len(content.encode()) if isinstance(content, str) else -1
-                      body = final_stream()
-
-                  self.send_response(200)
-                  self.send_header("Content-Type", "text/event-stream")
-                  self.send_header("Connection", "close")
-                  self.end_headers()
-                  self.wfile.write(body)
-                  self.wfile.flush()
-                  self.close_connection = True
-
-          server = HTTPServer(("127.0.0.1", 0), Handler)
-          thread = threading.Thread(target=server.serve_forever, daemon=True)
-          thread.start()
-          child_env = [
-              "HOME=" + replay_home,
-              "PATH=/usr/local/bin:/usr/bin:/bin",
-              "CLAUDE_CODE_SHELL=/bin/bash",
-              "AGENTINTERPOSER_TOOL_PROOF=" + proof,
-              "CLAUDE_CONFIG_DIR=" + replay_home + "/.claude",
-              f"ANTHROPIC_BASE_URL=http://127.0.0.1:{server.server_port}",
-              "ANTHROPIC_AUTH_TOKEN=agentinterposer-local-placeholder",
-              "ANTHROPIC_MODEL=" + model,
-              "CLAUDE_CODE_DISABLE_THINKING=1",
-              "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
-              "CLAUDE_CODE_EFFORT_LEVEL=auto",
-              "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-              "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1",
-              "NO_PROXY=127.0.0.1,localhost",
-          ]
-          cmd = [
-              "sudo", "-u", claude_user, "--", "bash", "-c",
-              'cd "$1/work" && shift && exec env -i "$@"',
-              "bash", replay_home, *child_env,
-              claude_bin, "-p", prompt, "--bare", "--no-session-persistence",
-              "--tools", "Bash", "--permission-mode", "default", "--settings", replay_home + "/settings.json",
-              "--max-turns", "3", "--output-format", "stream-json", "--verbose",
-              "--debug", "--debug-file", replay_home + "/debug.log",
-          ]
-          try:
-              proc = subprocess.run(
-                  cmd,
-                  cwd="/tmp",
-                  stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL,
-                  timeout=60,
-              )
-          finally:
-              server.shutdown()
-          live_request_path = os.path.join(os.path.dirname(response_path), "request_1.json")
-          live_request = json.load(open(live_request_path, encoding="utf-8"))
-          replay_request = state["first_request"] if isinstance(state["first_request"], dict) else {}
-          sections = ["model", "max_tokens", "stream", "messages", "tools", "system", "metadata", "tool_choice"]
-          comparison = {name: live_request.get(name) == replay_request.get(name) for name in sections}
-          comparison["top_level_keys"] = sorted(live_request) == sorted(replay_request)
-
-          def normalize_dynamic(value):
-              if isinstance(value, dict):
-                  return {key: normalize_dynamic(child) for key, child in value.items()}
-              if isinstance(value, list):
-                  return [normalize_dynamic(child) for child in value]
-              if not isinstance(value, str):
-                  return value
-              value = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "<uuid>", value)
-              value = re.sub(r"\b[0-9a-fA-F]{24,}\b", "<hex>", value)
-              value = re.sub(r"\b[A-Za-z0-9_-]{24,}\b", "<token>", value)
-              value = re.sub(r"\b\d{4}-\d{2}-\d{2}[T ][0-9:.+-]+Z?\b", "<timestamp>", value)
-              return value
-
-          live_system = live_request.get("system") if isinstance(live_request.get("system"), list) else []
-          replay_system = replay_request.get("system") if isinstance(replay_request.get("system"), list) else []
-          system_details = {
-              "live_count": len(live_system),
-              "replay_count": len(replay_system),
-              "normalized_equal": normalize_dynamic(live_system) == normalize_dynamic(replay_system),
-              "blocks": [],
-          }
-          for index in range(min(max(len(live_system), len(replay_system)), 8)):
-              left = live_system[index] if index < len(live_system) and isinstance(live_system[index], dict) else {}
-              right = replay_system[index] if index < len(replay_system) and isinstance(replay_system[index], dict) else {}
-              left_text = left.get("text") if isinstance(left.get("text"), str) else ""
-              right_text = right.get("text") if isinstance(right.get("text"), str) else ""
-              system_details["blocks"].append({
-                  "keys_equal": sorted(left) == sorted(right),
-                  "type_equal": left.get("type") == right.get("type"),
-                  "text_bytes_live": len(left_text.encode("utf-8")),
-                  "text_bytes_replay": len(right_text.encode("utf-8")),
-                  "text_equal": left_text == right_text,
-                  "text_normalized_equal": normalize_dynamic(left_text) == normalize_dynamic(right_text),
-              })
-
-          live_metadata = live_request.get("metadata") if isinstance(live_request.get("metadata"), dict) else {}
-          replay_metadata = replay_request.get("metadata") if isinstance(replay_request.get("metadata"), dict) else {}
-          metadata_details = {
-              "keys_live": sorted(live_metadata),
-              "keys_replay": sorted(replay_metadata),
-              "keys_equal": sorted(live_metadata) == sorted(replay_metadata),
-              "normalized_equal": normalize_dynamic(live_metadata) == normalize_dynamic(replay_metadata),
-              "values": {},
-          }
-          for key in sorted(set(live_metadata) | set(replay_metadata)):
-              left = live_metadata.get(key)
-              right = replay_metadata.get(key)
-              metadata_details["values"][key] = {
-                  "kind_live": type(left).__name__,
-                  "kind_replay": type(right).__name__,
-                  "bytes_live": len(left.encode("utf-8")) if isinstance(left, str) else -1,
-                  "bytes_replay": len(right.encode("utf-8")) if isinstance(right, str) else -1,
-                  "equal": left == right,
-                  "normalized_equal": normalize_dynamic(left) == normalize_dynamic(right),
-              }
-
-          with open(summary_path, "w", encoding="utf-8") as handle:
-              json.dump({
-                  "exit": proc.returncode,
-                  "messages": state["messages"],
-                  "is_error": state["is_error"],
-                  "content_bytes": state["content_bytes"],
-                  "request_comparison": comparison,
-                  "system_details": system_details,
-                  "metadata_details": metadata_details,
-              }, handle)
-          PY
-            python3 "$claude_replay" \
-              "$claude_capture_dir/response_1.sse" \
-              "$replay_summary" \
-              "$CLAUDE_BIN" \
-              "$claude_user" \
-              "$replay_home" \
-              "$MODEL" \
-              "$proof" \
-              "$prompt"
-            python3 - "$replay_summary" <<'PY'
-          import json
-          import sys
-          data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=buffered-exact-flags-fresh-same-home-request-compare")
-          print("claude_code_replay_exit=" + str(data.get("exit")))
-          print("claude_code_replay_message_requests=" + str(data.get("messages")))
-          print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
-          print("claude_code_replay_tool_result_content_bytes=" + str(data.get("content_bytes")))
-          comparison = data.get("request_comparison", {})
-          for name in ["top_level_keys", "model", "max_tokens", "stream", "messages", "tools", "system", "metadata", "tool_choice"]:
-              print("claude_code_request_equal_" + name + "=" + str(bool(comparison.get(name))).lower())
-          system_details = data.get("system_details", {})
-          print("claude_code_system_block_count_live=" + str(system_details.get("live_count", 0)))
-          print("claude_code_system_block_count_replay=" + str(system_details.get("replay_count", 0)))
-          print("claude_code_system_normalized_equal=" + str(bool(system_details.get("normalized_equal"))).lower())
-          for index, block in enumerate(system_details.get("blocks", [])):
-              print(f"claude_code_system_block_{index}_keys_equal=" + str(bool(block.get("keys_equal"))).lower())
-              print(f"claude_code_system_block_{index}_type_equal=" + str(bool(block.get("type_equal"))).lower())
-              print(f"claude_code_system_block_{index}_text_bytes_live=" + str(block.get("text_bytes_live", -1)))
-              print(f"claude_code_system_block_{index}_text_bytes_replay=" + str(block.get("text_bytes_replay", -1)))
-              print(f"claude_code_system_block_{index}_text_equal=" + str(bool(block.get("text_equal"))).lower())
-              print(f"claude_code_system_block_{index}_text_normalized_equal=" + str(bool(block.get("text_normalized_equal"))).lower())
-          metadata_details = data.get("metadata_details", {})
-          print("claude_code_metadata_keys_live=" + ",".join(metadata_details.get("keys_live", [])))
-          print("claude_code_metadata_keys_replay=" + ",".join(metadata_details.get("keys_replay", [])))
-          print("claude_code_metadata_keys_equal=" + str(bool(metadata_details.get("keys_equal"))).lower())
-          print("claude_code_metadata_normalized_equal=" + str(bool(metadata_details.get("normalized_equal"))).lower())
-          for key, value in sorted(metadata_details.get("values", {}).items()):
-              safe_key = key if key.replace("_", "").isalnum() else "other"
-              print("claude_code_metadata_" + safe_key + "_kind_live=" + str(value.get("kind_live", "unknown")))
-              print("claude_code_metadata_" + safe_key + "_kind_replay=" + str(value.get("kind_replay", "unknown")))
-              print("claude_code_metadata_" + safe_key + "_bytes_live=" + str(value.get("bytes_live", -1)))
-              print("claude_code_metadata_" + safe_key + "_bytes_replay=" + str(value.get("bytes_replay", -1)))
-              print("claude_code_metadata_" + safe_key + "_equal=" + str(bool(value.get("equal"))).lower())
-              print("claude_code_metadata_" + safe_key + "_normalized_equal=" + str(bool(value.get("normalized_equal"))).lower())
-          PY
-            rm -f "$replay_summary"
-          else
-            echo 'claude_code_replay_response=missing'
-          fi
-          if [ "$claude_exit" -ne 0 ]; then
-            python3 - "$claude_capture_dir" <<'PY'
-          import glob
-          import json
-          import os
-          import sys
-
-          capture_dir = sys.argv[1]
-          requests = sorted(glob.glob(os.path.join(capture_dir, "request_*.json")))
-          print("claude_code_captured_request_count=" + str(len(requests)))
-          for position, path in enumerate(requests, 1):
-              try:
-                  data = json.load(open(path, encoding="utf-8"))
-              except Exception:
-                  print(f"claude_code_request_{position}_json=invalid")
-                  continue
-              print(f"claude_code_request_{position}_keys=" + ",".join(sorted(data)))
-              status_path = os.path.join(capture_dir, f"response_{position}.status")
-              status = open(status_path, encoding="utf-8").read().strip() if os.path.exists(status_path) else "missing"
-              print(f"claude_code_request_{position}_response_status={status}")
-              messages = data.get("messages")
-              if not isinstance(messages, list):
-                  messages = []
-              print(f"claude_code_request_{position}_message_roles=" + ",".join(str(m.get("role", "unknown")) for m in messages if isinstance(m, dict)))
-              block_types = []
-              tool_result_shapes = []
-              tool_use_shapes = []
-              for message in messages:
-                  if not isinstance(message, dict):
-                      continue
-                  content = message.get("content")
-                  if not isinstance(content, list):
-                      continue
-                  for block in content:
-                      if not isinstance(block, dict):
-                          continue
-                      block_type = str(block.get("type", "unknown"))
-                      block_types.append(block_type)
-                      if block_type == "tool_result":
-                          nested = block.get("content")
-                          nested_types = []
-                          if isinstance(nested, list):
-                              nested_types = [str(item.get("type", "unknown")) for item in nested if isinstance(item, dict)]
-                          content_text = nested if isinstance(nested, str) else ""
-                          lowered = content_text.lower()
-                          error_classes = []
-                          for needle, label in [
-                              ("command not found", "command-not-found"),
-                              ("not found", "not-found"),
-                              ("permission denied", "permission"),
-                              ("operation not permitted", "sandbox"),
-                              ("exit code", "exit-code"),
-                              ("timed out", "timeout"),
-                              ("timeout", "timeout"),
-                              ("openssl", "openssl"),
-                              ("working directory", "working-directory"),
-                              ("no such file", "no-such-file"),
-                          ]:
-                              if needle in lowered and label not in error_classes:
-                                  error_classes.append(label)
-                          tool_result_shapes.append(
-                              "keys=" + "+".join(sorted(block))
-                              + ";is_error=" + str(bool(block.get("is_error"))).lower()
-                              + ";content_kind=" + type(nested).__name__
-                              + ";content_bytes=" + str(len(content_text.encode("utf-8")))
-                              + ";error_classes=" + ("+".join(error_classes) if error_classes else "other")
-                              + ";nested_types=" + ("+".join(nested_types) if nested_types else "none")
-                          )
-                      elif block_type == "tool_use":
-                          tool_input = block.get("input")
-                          tool_use_shapes.append(
-                              "keys=" + "+".join(sorted(block))
-                              + ";name=" + str(block.get("name", "unknown"))
-                              + ";input_keys=" + ("+".join(sorted(tool_input)) if isinstance(tool_input, dict) else "none")
-                          )
-              print(f"claude_code_request_{position}_content_block_types=" + (",".join(block_types) if block_types else "none"))
-              print(f"claude_code_request_{position}_tool_result_shapes=" + ("|".join(tool_result_shapes) if tool_result_shapes else "none"))
-              print(f"claude_code_request_{position}_tool_use_shapes=" + ("|".join(tool_use_shapes) if tool_use_shapes else "none"))
-              tools = data.get("tools")
-              if not isinstance(tools, list):
-                  tools = []
-              print(f"claude_code_request_{position}_tool_names=" + ",".join(str(tool.get("name", "unknown")) for tool in tools if isinstance(tool, dict)))
-          PY
-            python3 - "$claude_output" "$claude_stderr" <<'PY'
+          python3 - "$claude_output" "$claude_stderr" "$proof_expected" "$claude_exit" <<'PY'
           import json
           import os
           import re
           import sys
 
-          output_path, stderr_path = sys.argv[1:]
-
-          def classify(text):
-              text = text.lower()
-              labels = []
-              for needle, label in [
-                  ("permission", "permission"), ("denied", "permission"),
-                  ("invalid_request", "invalid-request"), ("invalid request", "invalid-request"),
-                  ("cache_control", "cache-control"), ("metadata", "metadata"),
-                  ("tool_result", "tool-result"), ("tool result", "tool-result"),
-                  ("tool_use", "tool-use"), ("tool use", "tool-use"),
-                  ("rate limit", "rate-limit"), ("rate_limit", "rate-limit"),
-                  ("overloaded", "overloaded"), ("server error", "server-error"),
-                  ("api error", "api-error"), ("authentication", "auth"),
-                  ("unauthorized", "auth"), ("model", "model"),
-                  ("connection", "connection"), ("timeout", "timeout"),
-                  ("max turns", "max-turns"), ("max_turns", "max-turns"),
-              ]:
-                  if needle in text and label not in labels:
-                      labels.append(label)
-              return labels
-
+          output_path, stderr_path, proof_path, exit_text = sys.argv[1:]
+          exit_code = int(exit_text)
+          expected_proof = open(proof_path, encoding="utf-8").read().strip()
           events = []
-          if os.path.getsize(output_path):
+          if os.path.exists(output_path):
               for raw in open(output_path, encoding="utf-8", errors="replace"):
                   raw = raw.strip()
                   if not raw:
                       continue
                   try:
                       value = json.loads(raw)
-                  except Exception:
+                  except json.JSONDecodeError:
                       continue
                   if isinstance(value, dict):
                       events.append(value)
-          print("claude_code_event_count=" + str(len(events)))
-          print("claude_code_event_types=" + ",".join(sorted({str(e.get("type", "unknown")) for e in events})))
 
           def walk(value):
               if isinstance(value, dict):
@@ -1369,185 +872,31 @@ jobs:
                   for child in value:
                       yield from walk(child)
 
-          expected = "echo $AGENTINTERPOSER_TOOL_PROOF"
-          bash_commands = []
-          bash_tool_ids = []
-          bash_input_shapes = []
-          for event in events:
-              for obj in walk(event):
-                  if obj.get("type") != "tool_use" or obj.get("name") != "Bash":
-                      continue
-                  tool_input = obj.get("input")
-                  tool_id = obj.get("id")
-                  if isinstance(tool_id, str):
-                      bash_tool_ids.append(tool_id)
-                  if isinstance(tool_input, dict):
-                      description = tool_input.get("description")
-                      bash_input_shapes.append(
-                          "keys=" + "+".join(sorted(tool_input))
-                          + ";description_kind=" + type(description).__name__
-                          + ";description_bytes=" + str(len(description.encode("utf-8")) if isinstance(description, str) else 0)
-                      )
-                  if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
-                      bash_commands.append(tool_input["command"])
-          print("claude_code_bash_tool_use_count=" + str(len(bash_commands)))
-          if bash_tool_ids:
-              tool_id = bash_tool_ids[0]
-              prefix = tool_id.split("_", 1)[0] if "_" in tool_id else tool_id[:12]
-              if not re.fullmatch(r"[A-Za-z0-9-]{1,24}", prefix):
-                  prefix = "other"
-              print("claude_code_bash_tool_id_prefix=" + prefix)
-              print("claude_code_bash_tool_id_length=" + str(len(tool_id)))
-          print("claude_code_bash_input_shapes=" + ("|".join(bash_input_shapes) if bash_input_shapes else "none"))
-          if bash_commands:
-              command = bash_commands[0]
-              trimmed = command.strip()
-              print("claude_code_bash_command_length=" + str(len(command)))
-              print("claude_code_bash_command_exact=" + str(command == expected).lower())
-              print("claude_code_bash_command_trimmed_exact=" + str(trimmed == expected).lower())
-              print("claude_code_bash_command_starts_expected=" + str(trimmed.startswith(expected)).lower())
-              print("claude_code_bash_command_matches_proof_env=" + str(command.strip() == "echo $AGENTINTERPOSER_TOOL_PROOF").lower())
-              print("claude_code_bash_command_has_newline=" + str("\n" in command or "\r" in command).lower())
-              print("claude_code_bash_command_has_pipe=" + str("|" in command).lower())
-              print("claude_code_bash_command_has_redirect=" + str(">" in command or "<" in command).lower())
-              print("claude_code_bash_command_has_single_quote=" + str("'" in command).lower())
-              print("claude_code_bash_command_has_double_quote=" + str('"' in command).lower())
-              first_word = trimmed.split(None, 1)[0] if trimmed else "none"
-              if not re.fullmatch(r"[A-Za-z0-9_./:-]{1,80}", first_word):
-                  first_word = "other"
-              print("claude_code_bash_command_first_word=" + first_word)
-              try:
-                  import shlex
-                  tokens = shlex.split(trimmed)
-              except Exception:
-                  tokens = []
-              print("claude_code_bash_command_token_count=" + str(len(tokens)))
-              print("claude_code_bash_command_semantic_exact=" + str(tokens == ["echo", "$AGENTINTERPOSER_TOOL_PROOF"]).lower())
-
-          execution_shapes = []
-          for event in events:
-              for obj in walk(event):
-                  if not isinstance(obj, dict):
-                      continue
-                  if not {"stdout", "stderr", "exitCode", "exit_code", "tool_use_result"}.intersection(obj):
-                      continue
-                  parts = ["keys=" + "+".join(sorted(obj))]
-                  for key in ("exitCode", "exit_code"):
-                      if isinstance(obj.get(key), int):
-                          parts.append(key + "=" + str(obj[key]))
-                  for key in ("stdout", "stderr"):
-                      value = obj.get(key)
-                      if not isinstance(value, str):
-                          continue
-                      parts.append(key + "_bytes=" + str(len(value.encode("utf-8"))))
-                      if key == "stderr":
-                          lowered = value.lower()
-                          classes = []
-                          for token, label in [
-                              ("unbound variable", "unbound-variable"),
-                              ("permission denied", "permission"),
-                              ("operation not permitted", "operation-not-permitted"),
-                              ("no such file", "no-such-file"),
-                              ("not found", "not-found"),
-                              ("sandbox", "sandbox"),
-                              ("bwrap", "bwrap"),
-                              ("shell snapshot", "shell-snapshot"),
-                              ("login shell", "login-shell"),
-                              ("spawn", "spawn"),
-                              ("exec", "exec"),
-                          ]:
-                              if token in lowered and label not in classes:
-                                  classes.append(label)
-                          parts.append("stderr_classes=" + ("+".join(classes) if classes else "other"))
-                  nested = obj.get("tool_use_result")
-                  if isinstance(nested, str):
-                      parts.append("tool_use_result_kind=str")
-                      parts.append("tool_use_result_bytes=" + str(len(nested.encode("utf-8"))))
-                  elif isinstance(nested, dict):
-                      parts.append("tool_use_result_kind=dict")
-                      parts.append("tool_use_result_keys=" + "+".join(sorted(nested)))
-                  execution_shapes.append(";".join(parts))
-          print("claude_code_execution_shapes=" + ("|".join(execution_shapes[:8]) if execution_shapes else "none"))
-
-          permission_events = [
-              event for event in events
-              if event.get("type") == "system" and event.get("subtype") == "permission_denied"
-          ]
-          print("claude_code_permission_denied_event_count=" + str(len(permission_events)))
-          if permission_events:
-              reason_type = permission_events[-1].get("decision_reason_type")
-              if not isinstance(reason_type, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", reason_type):
-                  reason_type = "unknown"
-              print("claude_code_permission_decision_reason_type=" + reason_type)
-              reason = " ".join(
-                  str(permission_events[-1].get(key, ""))
-                  for key in ("decision_reason", "message")
-              ).lower()
-              reason_labels = []
-              for needle, label in [
-                  ("rule", "rule"), ("mode", "mode"), ("deny", "deny"),
-                  ("ask", "ask"), ("outside", "outside-path"),
-                  ("sandbox", "sandbox"), ("permission", "permission"),
-              ]:
-                  if needle in reason and label not in reason_labels:
-                      reason_labels.append(label)
-              print("claude_code_permission_reason_classes=" + (",".join(reason_labels) if reason_labels else "other"))
-
-          result = next((e for e in reversed(events) if e.get("type") == "result"), None)
-          if result is not None:
-              print("claude_code_subtype=" + str(result.get("subtype", "unknown")))
-              print("claude_code_is_error=" + str(bool(result.get("is_error"))).lower())
-              print("claude_code_num_turns=" + str(result.get("num_turns", "unknown")))
-              print("claude_code_api_error_status=" + str(result.get("api_error_status", "none")))
-              print("claude_code_terminal_reason=" + str(result.get("terminal_reason", "none")))
-              denials = result.get("permission_denials")
-              if not isinstance(denials, list):
-                  denials = []
-              print("claude_code_permission_denials_count=" + str(len(denials)))
-              tool_names = []
-              for denial in denials:
-                  if not isinstance(denial, dict):
-                      continue
-                  name = denial.get("tool_name") or denial.get("name")
-                  if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", name) and name not in tool_names:
-                      tool_names.append(name)
-              print("claude_code_permission_denied_tools=" + (",".join(tool_names) if tool_names else "none"))
-              error_text = " ".join(str(item) for item in result.get("errors", []) if isinstance(item, str))
-              result_text = result.get("result") if isinstance(result.get("result"), str) else ""
-              classes = classify(error_text + " " + result_text)
-              print("claude_code_output_error_classes=" + (",".join(classes) if classes else "other"))
-          if os.path.getsize(stderr_path):
-              text = open(stderr_path, encoding="utf-8", errors="replace").read()
-              classes = classify(text)
-              print("claude_code_stderr_classes=" + (",".join(classes) if classes else "other"))
-          PY
-            exit 1
-          fi
-
-          python3 - "$claude_output" "$proof_expected" <<'PY'
-          import json
-          import re
-          import sys
-
-          output_path, proof_path = sys.argv[1:]
-          expected_proof = open(proof_path, encoding="utf-8").read().strip()
-          events = []
-          for raw in open(output_path, encoding="utf-8", errors="strict"):
-              raw = raw.strip()
-              if not raw:
-                  continue
-              value = json.loads(raw)
-              if isinstance(value, dict):
-                  events.append(value)
-
-          def walk(value):
-              if isinstance(value, dict):
-                  yield value
-                  for child in value.values():
-                      yield from walk(child)
-              elif isinstance(value, list):
-                  for child in value:
-                      yield from walk(child)
+          result = next((event for event in reversed(events) if event.get("type") == "result"), None)
+          if exit_code != 0:
+              print("claude_code_failure_event_count=" + str(len(events)))
+              if isinstance(result, dict):
+                  denials = result.get("permission_denials")
+                  if not isinstance(denials, list):
+                      denials = []
+                  print("claude_code_failure_permission_denials=" + str(len(denials)))
+                  status = result.get("api_error_status")
+                  if isinstance(status, int):
+                      print("claude_code_failure_api_status=" + str(status))
+              if os.path.exists(stderr_path) and os.path.getsize(stderr_path):
+                  text = open(stderr_path, encoding="utf-8", errors="replace").read().lower()
+                  labels = []
+                  for needle, label in [
+                      ("permission", "permission"),
+                      ("api error", "api-error"),
+                      ("timeout", "timeout"),
+                      ("connection", "connection"),
+                      ("model", "model"),
+                  ]:
+                      if needle in text and label not in labels:
+                          labels.append(label)
+                  print("claude_code_failure_stderr_classes=" + (",".join(labels) if labels else "other"))
+              raise SystemExit("Claude Code certification client failed")
 
           command = "echo $AGENTINTERPOSER_TOOL_PROOF"
           tool_uses = []
@@ -1579,21 +928,24 @@ jobs:
               if isinstance(value, str):
                   return value
               if isinstance(value, list):
-                  parts = []
-                  for block in value:
-                      if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                          parts.append(block["text"])
-                  return "\n".join(parts)
+                  return "\n".join(
+                      block["text"]
+                      for block in value
+                      if isinstance(block, dict)
+                      and block.get("type") == "text"
+                      and isinstance(block.get("text"), str)
+                  )
               return ""
 
-          tool_text = text_content(matching_results[0].get("content"))
-          proof = tool_text.strip()
+          proof = text_content(matching_results[0].get("content")).strip()
           if not re.fullmatch(r"[0-9a-f]{32}", proof, re.I) or proof != expected_proof:
               raise SystemExit("Claude Code Bash tool_result did not preserve the hidden proof")
 
-          result = next((event for event in reversed(events) if event.get("type") == "result"), None)
-          if result is None or result.get("subtype") != "success" or result.get("is_error"):
+          if not isinstance(result, dict) or result.get("subtype") != "success" or result.get("is_error"):
               raise SystemExit("Claude Code did not finish with a successful result event")
+          denials = result.get("permission_denials")
+          if denials not in (None, []):
+              raise SystemExit("Claude Code reported a permission denial during certification")
           turns = result.get("num_turns")
           if not isinstance(turns, int) or turns < 2 or turns > 3:
               raise SystemExit("Claude Code completed with an unexpected turn count")
