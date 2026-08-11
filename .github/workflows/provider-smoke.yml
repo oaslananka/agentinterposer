@@ -900,10 +900,13 @@ jobs:
           echo 'claude_code_secret_environment_isolation=ok'
 
           prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
+          if ! sudo -u "$claude_user" sh -c 'cd "$1" && test "$PWD" = "$1"' sh "$claude_home/work"; then
+            echo 'Claude Code certification workdir is not accessible to the probe user.' >&2
+            exit 1
+          fi
+          echo 'claude_code_workdir_access=ok'
           set +e
-          (
-            cd "$claude_home/work"
-            sudo -u "$claude_user" env -i \
+          sudo -u "$claude_user" env -i \
             HOME="$claude_home" \
             PATH="/usr/local/bin:/usr/bin:/bin" \
             CLAUDE_CODE_SHELL='/bin/bash' \
@@ -918,6 +921,7 @@ jobs:
             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1' \
             CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK='1' \
             NO_PROXY='127.0.0.1,localhost' \
+            bash -c 'cd "$1" && shift && exec "$@"' bash "$claude_home/work" \
             timeout 180s "$CLAUDE_BIN" \
               -p "$prompt" \
               --bare \
@@ -931,7 +935,6 @@ jobs:
               --debug \
               --debug-file "$claude_home/debug.log" \
               >"$claude_output" 2>"$claude_stderr"
-          )
           claude_exit=$?
           set -e
           echo "claude_code_exit=${claude_exit}"
