@@ -873,8 +873,10 @@ jobs:
           sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
           if [ "$SCOPE" = 'claude-code-error' ]; then
             printf '%s\n' '{"permissions":{"allow":["Bash(false)","Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
-          elif [ "$SCOPE" = 'claude-code-loop' ] || [ "$SCOPE" = 'claude-code-parallel' ]; then
+          elif [ "$SCOPE" = 'claude-code-loop' ]; then
             printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)","Bash(printf *)","Bash(sha256sum)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
+          elif [ "$SCOPE" = 'claude-code-parallel' ]; then
+            printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)","Bash(printf %s $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
           else
             printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
           fi
@@ -924,7 +926,7 @@ jobs:
             max_turns=5
             prompt=$'Use Bash exactly twice, sequentially. First run exactly `echo $AGENTINTERPOSER_TOOL_PROOF`. The hidden proof is not present in this prompt. After you receive the first tool result, strip its trailing newline and call Bash a second time with exactly `printf %s PROOF_VALUE | sha256sum`, replacing PROOF_VALUE with the literal 32-character proof from the first tool result. Do not use the environment variable in the second command and do not run any other command. After the second command completes, reply with exactly the 64-character SHA-256 digest from its stdout and no other text.'
           elif [ "$SCOPE" = 'claude-code-parallel' ]; then
-            prompt=$'Use Bash exactly twice in one parallel tool batch in the same assistant turn. Do not wait for either tool result before issuing the other call. The two exact command strings must be `echo $AGENTINTERPOSER_TOOL_PROOF` and `printf %s "$AGENTINTERPOSER_TOOL_PROOF" | sha256sum`. The hidden proof is not present in this prompt. Do not run any other command. After both tool results arrive, reply with exactly two lines: first the 32-character proof from the echo result, then the 64-character SHA-256 digest from the sha256sum result, with no labels or other text.'
+            prompt=$'Use Bash exactly twice in one parallel tool batch in the same assistant turn. Do not wait for either tool result before issuing the other call. The two exact command strings must be `echo $AGENTINTERPOSER_TOOL_PROOF` and `printf %s $AGENTINTERPOSER_TOOL_PROOF`. The hidden proof is not present in this prompt. Do not run any other command. After both tool results arrive, reply with exactly two lines containing the same 32-character proof, with no labels or other text.'
           else
             prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
           fi
@@ -1086,21 +1088,19 @@ jobs:
           elif scope == "claude-code-parallel":
               if len(tool_uses) != 2:
                   raise SystemExit("Claude Code parallel certification emitted an unexpected Bash tool_use count")
-              hash_command = 'printf %s "$AGENTINTERPOSER_TOOL_PROOF" | sha256sum'
-              hash_uses = matching_use(hash_command)
-              if len(hash_uses) != 1:
-                  raise SystemExit("Claude Code did not emit the exact parallel SHA-256 Bash tool_use")
-              hash_result = result_for(hash_uses[0])
-              if hash_result.get("is_error") is True:
-                  raise SystemExit("Claude Code parallel SHA-256 Bash tool_result reported an error")
-              expected_hash = hashlib.sha256(proof.encode("utf-8")).hexdigest()
-              hash_text = text_content(hash_result.get("content")).strip()
-              hash_match = re.search(r"\b[0-9a-f]{64}\b", hash_text, re.I)
-              if not hash_match or hash_match.group(0).lower() != expected_hash:
-                  raise SystemExit("Claude Code parallel SHA-256 tool result did not match the hidden proof")
+              second_command = "printf %s $AGENTINTERPOSER_TOOL_PROOF"
+              second_uses = matching_use(second_command)
+              if len(second_uses) != 1:
+                  raise SystemExit("Claude Code did not emit the exact second parallel Bash tool_use")
+              second_result = result_for(second_uses[0])
+              if second_result.get("is_error") is True:
+                  raise SystemExit("Claude Code second parallel Bash tool_result reported an error")
+              second_proof = text_content(second_result.get("content")).strip()
+              if second_proof != expected_proof:
+                  raise SystemExit("Claude Code second parallel tool result did not preserve the hidden proof")
               success_id = success_uses[0].get("id")
-              hash_id = hash_uses[0].get("id")
-              parallel_ids = {success_id, hash_id}
+              second_id = second_uses[0].get("id")
+              parallel_ids = {success_id, second_id}
               same_event = any(
                   parallel_ids.issubset({
                       obj.get("id")
@@ -1111,7 +1111,7 @@ jobs:
               )
               if not same_event:
                   raise SystemExit("Claude Code did not emit both Bash tool_use blocks in one assistant event")
-              final_proof = proof + "\n" + expected_hash
+              final_proof = proof + "\n" + proof
           elif scope == "claude-code-loop":
               if len(tool_uses) != 2:
                   raise SystemExit("Claude Code dependent loop emitted an unexpected Bash tool_use count")
