@@ -970,13 +970,8 @@ jobs:
           print("claude_code_debug_exit_code_1_count=" + str(counts.get("exit-code-1", 0)))
           PY
           if [ -s "$claude_capture_dir/response_1.sse" ]; then
-            replay_home='/tmp/agentinterposer-claude-replay-home'
+            replay_home="$claude_home"
             replay_summary="$RUNNER_TEMP/claude-code-replay-summary.json"
-            rm -rf "$replay_home"
-            sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$replay_home" "$replay_home/.claude" "$replay_home/work"
-            printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-replay-settings.json"
-            sudo install -o "$claude_user" -g "$claude_user" -m 0600 "$RUNNER_TEMP/claude-replay-settings.json" "$replay_home/settings.json"
-            rm -f "$RUNNER_TEMP/claude-replay-settings.json"
             cat > "$claude_replay" <<'PY'
           import json
           import os
@@ -1109,7 +1104,7 @@ jobs:
           import json
           import sys
           data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=buffered-exact-prompt-request-compare")
+          print("claude_code_replay_framing=buffered-exact-prompt-same-home-request-compare")
           print("claude_code_replay_exit=" + str(data.get("exit")))
           print("claude_code_replay_message_requests=" + str(data.get("messages")))
           print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
@@ -1118,7 +1113,6 @@ jobs:
           for name in ["top_level_keys", "model", "max_tokens", "stream", "messages", "tools", "system", "metadata", "tool_choice"]:
               print("claude_code_request_equal_" + name + "=" + str(bool(comparison.get(name))).lower())
           PY
-            rm -rf "$replay_home"
             rm -f "$replay_summary"
           else
             echo 'claude_code_replay_response=missing'
