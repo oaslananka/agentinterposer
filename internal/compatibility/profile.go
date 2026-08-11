@@ -44,6 +44,14 @@ func (p Profile) Capabilities() []Capability {
 }
 
 var builtinProfiles = map[string]Profile{
+	"meta/llama-3.2-11b-vision-instruct": {
+		Model: "meta/llama-3.2-11b-vision-instruct",
+		capabilities: map[Capability]bool{
+			CapabilityChatCompletions: true,
+			CapabilityVisionInput:     true,
+		},
+		Certifications: []Certification{},
+	},
 	"nvidia/nemotron-3-super-120b-a12b": {
 		Model: "nvidia/nemotron-3-super-120b-a12b",
 		capabilities: map[Capability]bool{

@@ -18,6 +18,7 @@ on:
           - full
           - models
           - messages
+          - messages-vision
           - messages-stream
           - claude-code
           - claude-code-error
@@ -571,6 +572,152 @@ jobs:
           print("agentinterposer_messages_tool_result_round_trip=ok")
           PY
           echo 'messages_adapter_verified=true' >> "$GITHUB_OUTPUT"
+
+      - name: Probe AgentInterposer Messages vision adapter
+        if: ${{ inputs.scope == 'messages-vision' }}
+        id: messages_vision_gateway
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/agentinterposer-messages-vision"
+          log="$RUNNER_TEMP/agentinterposer-messages-vision.log"
+          request="$(mktemp)"
+          response="$(mktemp)"
+          expected="$(mktemp)"
+          pid=''
+
+          cleanup() {
+            rm -f "$request" "$response" "$expected" "$binary" "$log"
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$log" 2>&1 &
+          pid=$!
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for the Messages vision probe.' >&2
+            exit 1
+          fi
+
+          python3 - "$MODEL" "$request" "$expected" <<'PY'
+          import base64
+          import binascii
+          import json
+          import secrets
+          import struct
+          import sys
+          import zlib
+
+          model, request_path, expected_path = sys.argv[1:]
+          red_side = secrets.choice(("LEFT", "RIGHT"))
+          width, height = 128, 64
+          red = bytes((255, 0, 0))
+          blue = bytes((0, 0, 255))
+          left, right = (red, blue) if red_side == "LEFT" else (blue, red)
+          rows = []
+          for _ in range(height):
+              rows.append(b"\x00" + left * (width // 2) + right * (width // 2))
+
+          def chunk(kind, payload):
+              return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", binascii.crc32(kind + payload) & 0xFFFFFFFF)
+
+          png = (
+              b"\x89PNG\r\n\x1a\n"
+              + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+              + chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
+              + chunk(b"IEND", b"")
+          )
+          image_data = base64.b64encode(png).decode("ascii")
+          payload = {
+              "model": model,
+              "max_tokens": 8,
+              "messages": [{
+                  "role": "user",
+                  "content": [
+                      {
+                          "type": "image",
+                          "source": {
+                              "type": "base64",
+                              "media_type": "image/png",
+                              "data": image_data,
+                          },
+                      },
+                      {
+                          "type": "text",
+                          "text": "Which half of the image is red? Reply with exactly LEFT or RIGHT and no other text.",
+                      },
+                  ],
+              }],
+          }
+          with open(request_path, "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, separators=(",", ":"))
+          with open(expected_path, "w", encoding="utf-8") as handle:
+              handle.write(red_side + "\n")
+          print("agentinterposer_messages_vision_fixture=ok")
+          PY
+
+          status="$(curl --silent --show-error \
+            --max-time 180 \
+            --output "$response" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/messages' \
+            --header 'Content-Type: application/json' \
+            --header 'anthropic-version: 2023-06-01' \
+            --data-binary "@$request")"
+          echo "agentinterposer_messages_vision_http=${status}"
+          if [[ ! "$status" =~ ^2 ]]; then
+            echo 'AgentInterposer Messages vision probe failed.' >&2
+            exit 1
+          fi
+
+          python3 - "$response" "$expected" <<'PY'
+          import json
+          import re
+          import sys
+
+          response_path, expected_path = sys.argv[1:]
+          data = json.load(open(response_path, encoding="utf-8"))
+          if data.get("type") != "message" or data.get("role") != "assistant":
+              raise SystemExit("Messages vision response has an unexpected envelope")
+          content = data.get("content")
+          if not isinstance(content, list):
+              raise SystemExit("Messages vision response content is not a list")
+          text = "".join(
+              block.get("text", "")
+              for block in content
+              if isinstance(block, dict) and block.get("type") == "text"
+          ).strip().upper()
+          expected = open(expected_path, encoding="utf-8").read().strip().upper()
+          directions = re.findall(r"\b(?:LEFT|RIGHT)\b", text)
+          if not directions or len(set(directions)) != 1:
+              raise SystemExit("Messages vision response did not contain one unambiguous direction")
+          if directions[0] != expected:
+              raise SystemExit("Messages vision response did not match the randomized image fixture")
+          if data.get("stop_reason") not in {"end_turn", "max_tokens"}:
+              raise SystemExit("Messages vision response has an unexpected stop_reason")
+          print("agentinterposer_messages_vision_image_read=ok")
+          print("messages_vision_verified=true")
+          PY
+          echo 'messages_vision_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe AgentInterposer Messages streaming adapter
         if: ${{ inputs.scope == 'messages-stream' }}
@@ -1507,6 +1654,8 @@ jobs:
           GATEWAY_OUTCOME: ${{ steps.gateway.outcome }}
           MESSAGES_GATEWAY_OUTCOME: ${{ steps.messages_gateway.outcome }}
           MESSAGES_ADAPTER_VERIFIED: ${{ steps.messages_gateway.outputs.messages_adapter_verified }}
+          MESSAGES_VISION_OUTCOME: ${{ steps.messages_vision_gateway.outcome }}
+          MESSAGES_VISION_VERIFIED: ${{ steps.messages_vision_gateway.outputs.messages_vision_verified }}
           MESSAGES_STREAM_OUTCOME: ${{ steps.messages_stream_gateway.outcome }}
           MESSAGES_STREAM_VERIFIED: ${{ steps.messages_stream_gateway.outputs.messages_stream_verified }}
           CLAUDE_CODE_OUTCOME: ${{ steps.claude_code.outcome }}
@@ -1549,6 +1698,9 @@ jobs:
             elif [ "$SCOPE" = 'messages' ]; then
               echo "- AgentInterposer Messages adapter step: ${MESSAGES_GATEWAY_OUTCOME:-not-run}"
               echo "- Messages text + tool round trip: ${MESSAGES_ADAPTER_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'messages-vision' ]; then
+              echo "- AgentInterposer Messages vision step: ${MESSAGES_VISION_OUTCOME:-not-run}"
+              echo "- Randomized base64 image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'messages-stream' ]; then
               echo "- AgentInterposer Messages streaming step: ${MESSAGES_STREAM_OUTCOME:-not-run}"
               echo "- Messages text + tool SSE: ${MESSAGES_STREAM_VERIFIED:-not-verified}"
