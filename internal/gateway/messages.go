@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/oaslananka/agentinterposer/internal/compatibility"
 )
 
 type anthropicMessagesRequest struct {
@@ -243,7 +245,11 @@ func (h *handler) selectMessagesModel(request chatCompletionRequest) string {
 	if !chatRequestHasVisionInput(request) {
 		return request.Model
 	}
-	return h.selectCertifiedVisionModel(request.Model)
+	return h.selectCertifiedModel(
+		request.Model,
+		compatibility.CapabilityChatCompletions,
+		compatibility.CapabilityVisionInput,
+	)
 }
 
 func chatRequestHasVisionInput(request chatCompletionRequest) bool {
