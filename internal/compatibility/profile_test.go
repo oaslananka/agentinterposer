@@ -56,3 +56,39 @@ func TestKnownNemotronCertificationsMatchHostedSmokeContracts(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectModelSkipsUnknownCandidatesAndUsesFirstCertifiedMatch(t *testing.T) {
+	t.Parallel()
+
+	profile, ok := SelectModel(
+		[]string{"provider/unknown-model", "nvidia/nemotron-3-super-120b-a12b"},
+		CapabilityResponses,
+		CapabilityToolCalling,
+	)
+	if !ok {
+		t.Fatal("SelectModel() did not find a certified matching candidate")
+	}
+	if profile.Model != "nvidia/nemotron-3-super-120b-a12b" {
+		t.Fatalf("selected model = %q", profile.Model)
+	}
+}
+
+func TestSelectModelDoesNotRouteToModelMissingRequiredCapability(t *testing.T) {
+	t.Parallel()
+
+	if profile, ok := SelectModel([]string{"nvidia/nemotron-3-super-120b-a12b"}, CapabilityVisionInput); ok {
+		t.Fatalf("SelectModel() = %#v, true; want no certified vision candidate", profile)
+	}
+}
+
+func TestSelectModelRequiresEveryRequestedCapability(t *testing.T) {
+	t.Parallel()
+
+	if profile, ok := SelectModel(
+		[]string{"nvidia/nemotron-3-super-120b-a12b"},
+		CapabilityChatCompletions,
+		CapabilityVisionInput,
+	); ok {
+		t.Fatalf("SelectModel() = %#v, true; want no candidate satisfying every capability", profile)
+	}
+}

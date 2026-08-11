@@ -52,3 +52,23 @@ func Lookup(model string) (Profile, bool) {
 	profile, ok := builtinProfiles[model]
 	return profile, ok
 }
+
+func SelectModel(candidates []string, required ...Capability) (Profile, bool) {
+	for _, model := range candidates {
+		profile, ok := Lookup(model)
+		if !ok {
+			continue
+		}
+		matched := true
+		for _, capability := range required {
+			if !profile.Supports(capability) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return profile, true
+		}
+	}
+	return Profile{}, false
+}
