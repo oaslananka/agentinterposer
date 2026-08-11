@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const defaultMaxRequestBytes int64 = 32 << 20
+const (
+	defaultMaxRequestBytes int64 = 32 << 20
+	contentTypeHeader            = "Content-Type"
+)
 
 type Config struct {
 	UpstreamURL         string
@@ -133,11 +136,11 @@ func writeUpstreamResponse(w http.ResponseWriter, response *http.Response, err e
 	}
 	defer response.Body.Close()
 
-	copyHeader(w.Header(), response.Header, "Content-Type")
+	copyHeader(w.Header(), response.Header, contentTypeHeader)
 	copyHeader(w.Header(), response.Header, "Cache-Control")
 	copyHeader(w.Header(), response.Header, "Retry-After")
 	w.WriteHeader(response.StatusCode)
-	_ = copyResponseBody(w, response.Body, response.Header.Get("Content-Type"))
+	_ = copyResponseBody(w, response.Body, response.Header.Get(contentTypeHeader))
 }
 
 func copyResponseBody(w http.ResponseWriter, body io.Reader, contentType string) error {
@@ -176,19 +179,9 @@ func (h *handler) doUpstream(r *http.Request, body []byte, upstreamPath string) 
 
 func (h *handler) doUpstreamMethod(r *http.Request, method string, body []byte, upstreamPath string) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
-		var requestBody io.Reader
-		if method == http.MethodPost || len(body) > 0 {
-			requestBody = bytes.NewReader(body)
-		}
-		upstreamRequest, err := http.NewRequestWithContext(r.Context(), method, upstreamEndpoint(h.upstreamURL, upstreamPath), requestBody)
+		upstreamRequest, err := h.newUpstreamRequest(r, method, body, upstreamPath)
 		if err != nil {
 			return nil, err
-		}
-		if method == http.MethodPost {
-			upstreamRequest.Header.Set("Content-Type", "application/json")
-		}
-		if h.upstreamBearerToken != "" {
-			upstreamRequest.Header.Set("Authorization", "Bearer "+h.upstreamBearerToken)
 		}
 
 		response, err := h.client.Do(upstreamRequest)
@@ -207,6 +200,25 @@ func (h *handler) doUpstreamMethod(r *http.Request, method string, body []byte, 
 			return nil, err
 		}
 	}
+}
+
+func (h *handler) newUpstreamRequest(r *http.Request, method string, body []byte, upstreamPath string) (*http.Request, error) {
+	var requestBody io.Reader
+	if method == http.MethodPost || len(body) > 0 {
+		requestBody = bytes.NewReader(body)
+	}
+
+	request, err := http.NewRequestWithContext(r.Context(), method, upstreamEndpoint(h.upstreamURL, upstreamPath), requestBody)
+	if err != nil {
+		return nil, err
+	}
+	if method == http.MethodPost {
+		request.Header.Set(contentTypeHeader, "application/json")
+	}
+	if h.upstreamBearerToken != "" {
+		request.Header.Set("Authorization", "Bearer "+h.upstreamBearerToken)
+	}
+	return request, nil
 }
 
 func upstreamEndpoint(baseURL, path string) string {
@@ -248,7 +260,7 @@ func copyHeader(dst, src http.Header, key string) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
