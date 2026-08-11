@@ -403,7 +403,8 @@ jobs:
                   },
               ]
           elif os.environ["SCOPE"] == "responses-tool-fallback":
-              payload["input"] = "Call the probe function exactly once."
+              payload["input"] = "Call the probe function exactly once. Do not answer with normal text."
+              payload["max_output_tokens"] = 128
               payload["tools"] = [
                   {
                       "type": "function",
@@ -454,6 +455,15 @@ jobs:
               output = data.get("output")
               if not isinstance(output, list):
                   raise SystemExit("Responses tool fallback returned no output list")
+              item_labels = []
+              for item in output:
+                  if not isinstance(item, dict):
+                      item_labels.append("non-object")
+                      continue
+                  item_type = str(item.get("type") or "unknown")
+                  item_name = item.get("name")
+                  item_labels.append(item_type + ((":" + item_name) if isinstance(item_name, str) else ""))
+              print("agentinterposer_responses_output_items=" + ",".join(item_labels))
               calls = [
                   item for item in output
                   if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") == "probe"
