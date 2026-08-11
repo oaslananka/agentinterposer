@@ -100,6 +100,109 @@ func TestHandlerTranslatesAnthropicTextMessageToChatCompletions(t *testing.T) {
 	}
 }
 
+func TestTranslateAnthropicRequestAcceptsCompleteImmediateToolResults(t *testing.T) {
+	t.Parallel()
+
+	request := anthropicMessagesRequest{
+		Model:     "nvidia/test",
+		MaxTokens: 32,
+		Messages: []anthropicInputMessage{
+			{Role: "assistant", Content: json.RawMessage(`[
+				{"type":"tool_use","id":"call_one","name":"one","input":{}},
+				{"type":"tool_use","id":"call_two","name":"two","input":{}}
+			]`)},
+			{Role: "user", Content: json.RawMessage(`[
+				{"type":"tool_result","tool_use_id":"call_one","content":"first"},
+				{"type":"tool_result","tool_use_id":"call_two","content":"second"},
+				{"type":"text","text":"continue"}
+			]`)},
+		},
+	}
+
+	translated, err := translateAnthropicRequest(request)
+	if err != nil {
+		t.Fatalf("translateAnthropicRequest() error = %v", err)
+	}
+	if len(translated.Messages) != 4 {
+		t.Fatalf("translated message count = %d, want 4: %#v", len(translated.Messages), translated.Messages)
+	}
+	if translated.Messages[1].Role != "tool" || translated.Messages[1].ToolCallID != "call_one" {
+		t.Fatalf("translated[1] = %#v, want first tool result", translated.Messages[1])
+	}
+	if translated.Messages[2].Role != "tool" || translated.Messages[2].ToolCallID != "call_two" {
+		t.Fatalf("translated[2] = %#v, want second tool result", translated.Messages[2])
+	}
+	if translated.Messages[3].Role != "user" || translated.Messages[3].Content != "continue" {
+		t.Fatalf("translated[3] = %#v, want trailing user text", translated.Messages[3])
+	}
+}
+
+func TestTranslateAnthropicRequestRejectsToolResultAfterInterveningMessage(t *testing.T) {
+	t.Parallel()
+
+	request := anthropicMessagesRequest{
+		Model:     "nvidia/test",
+		MaxTokens: 32,
+		Messages: []anthropicInputMessage{
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_probe","name":"probe","input":{}}]`)},
+			{Role: "user", Content: json.RawMessage(`"intervening"`)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_probe","content":"late"}]`)},
+		},
+	}
+
+	_, err := translateAnthropicRequest(request)
+	if err == nil {
+		t.Fatal("translateAnthropicRequest() accepted a non-immediate tool_result")
+	}
+	if !strings.Contains(err.Error(), "immediately") {
+		t.Fatalf("error = %q, want immediate tool_result error", err)
+	}
+}
+
+func TestTranslateAnthropicRequestRejectsMissingToolResult(t *testing.T) {
+	t.Parallel()
+
+	request := anthropicMessagesRequest{
+		Model:     "nvidia/test",
+		MaxTokens: 32,
+		Messages: []anthropicInputMessage{
+			{Role: "assistant", Content: json.RawMessage(`[
+				{"type":"tool_use","id":"call_one","name":"one","input":{}},
+				{"type":"tool_use","id":"call_two","name":"two","input":{}}
+			]`)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_one","content":"done"}]`)},
+		},
+	}
+
+	_, err := translateAnthropicRequest(request)
+	if err == nil {
+		t.Fatal("translateAnthropicRequest() accepted a missing tool_result")
+	}
+	if !strings.Contains(err.Error(), "every tool_use") {
+		t.Fatalf("error = %q, want complete tool_result set error", err)
+	}
+}
+
+func TestTranslateAnthropicRequestRejectsUnmatchedToolResult(t *testing.T) {
+	t.Parallel()
+
+	request := anthropicMessagesRequest{
+		Model:     "nvidia/test",
+		MaxTokens: 32,
+		Messages: []anthropicInputMessage{
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_unknown","content":"orphan"}]`)},
+		},
+	}
+
+	_, err := translateAnthropicRequest(request)
+	if err == nil {
+		t.Fatal("translateAnthropicRequest() accepted an unmatched tool_result")
+	}
+	if !strings.Contains(err.Error(), "preceding tool_use") {
+		t.Fatalf("error = %q, want preceding tool_use error", err)
+	}
+}
+
 func TestTranslateAnthropicUserContentRejectsTextBeforeToolResult(t *testing.T) {
 	t.Parallel()
 
