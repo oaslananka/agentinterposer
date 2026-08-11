@@ -22,6 +22,30 @@ func TestLookupKnownNemotronProfile(t *testing.T) {
 	}
 }
 
+func TestLookupCertifiedLlamaVisionProfile(t *testing.T) {
+	t.Parallel()
+
+	profile, ok := Lookup("meta/llama-3.2-11b-vision-instruct")
+	if !ok {
+		t.Fatal("Lookup() did not return the certified Llama vision profile")
+	}
+	if !profile.Supports(CapabilityChatCompletions) {
+		t.Fatal("Llama vision profile must assert Chat Completions support")
+	}
+	if !profile.Supports(CapabilityVisionInput) {
+		t.Fatal("Llama vision profile must assert certified vision input support")
+	}
+	if profile.Supports(CapabilityResponses) {
+		t.Fatal("Llama vision profile must not assert uncertified Responses support")
+	}
+	if profile.Supports(CapabilityToolCalling) {
+		t.Fatal("Llama vision profile must not assert uncertified tool-calling support")
+	}
+	if len(profile.Certifications) != 0 {
+		t.Fatalf("Llama vision client certifications = %#v, want none", profile.Certifications)
+	}
+}
+
 func TestLookupUnknownModelDoesNotAssumeCapabilities(t *testing.T) {
 	t.Parallel()
 

@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for a single shell-tool round trip plus dependent two-tool and three-tool loops, and Claude Code CLI `2.1.226` over Messages for both a single Bash-tool round trip and a dependent two-tool loop, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for a single shell-tool round trip plus dependent two-tool and three-tool loops, and Claude Code CLI `2.1.226` over Messages for both a single Bash-tool round trip and a dependent two-tool loop, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. A separate randomized hosted image probe certifies base64 Messages vision input with `meta/llama-3.2-11b-vision-instruct`. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -32,6 +32,7 @@ The first vertical slice supports:
 - incremental flushing for `text/event-stream` responses
 - manual Codex CLI `0.147.0` certification for a Responses shell-tool round trip plus dependent two-tool and three-tool loops with `nvidia/nemotron-3-super-120b-a12b`
 - manual Claude Code CLI `2.1.226` certification for Messages single Bash-tool, dependent two-tool, and error-recovery round trips with `nvidia/nemotron-3-super-120b-a12b`
+- randomized hosted base64-image Messages certification with `meta/llama-3.2-11b-vision-instruct`
 - configurable request-size protection (default: `32 MiB`)
 - safe loopback binding by default (`127.0.0.1:11435`)
 
@@ -39,7 +40,7 @@ The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com
 
 ### Compatibility profiles
 
-AgentInterposer keeps explicit built-in compatibility assertions for model/client combinations that have reproducible certification evidence. The current `nvidia/nemotron-3-super-120b-a12b` profile asserts Chat Completions, native Responses, and tool calling, and records the hosted Codex CLI `0.147.0` and Claude Code CLI `2.1.226` certification scenarios described below. Vision input is intentionally not asserted for that model.
+AgentInterposer keeps explicit built-in compatibility assertions for model/client combinations that have reproducible certification evidence. The `nvidia/nemotron-3-super-120b-a12b` profile asserts Chat Completions, native Responses, and tool calling, and records the hosted Codex CLI `0.147.0` and Claude Code CLI `2.1.226` certification scenarios described below. Vision input is intentionally not asserted for that model. The separate `meta/llama-3.2-11b-vision-instruct` profile asserts Chat Completions and vision input only, backed by a hosted randomized base64-image read through the Messages adapter; Responses and tool calling remain uncertified for that profile.
 
 Profiles are positive assertions, not guesses: absence of a capability means **uncertified/unknown**, not a universal claim that the provider can never support it. The compatibility layer can conservatively select the first candidate model whose profile asserts every required capability while skipping unknown or incomplete candidates; automatic request rewriting is not enabled yet.
 
@@ -209,7 +210,7 @@ Near-term work is intentionally compatibility-first:
 1. Broaden Codex/Responses certification beyond the current single-tool, dependent two-tool, and dependent three-tool Nemotron 3 Super profiles to additional tool types, longer agent loops, Codex versions, and models.
 2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
-4. Expand the initial model capability profile and certification registry beyond the current Nemotron 3 Super evidence set.
+4. Expand the model capability registry beyond the current Nemotron 3 Super and Llama 3.2 Vision evidence sets.
 5. Integrate the conservative capability selector into explicit fallback-model and multi-provider routing configuration.
 6. Expand the initial Codex, Claude Code, and OpenCode configuration helpers to compatible VS Code clients.
 
