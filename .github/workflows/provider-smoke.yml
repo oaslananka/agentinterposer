@@ -1095,6 +1095,7 @@ jobs:
               claude_bin, "-p", prompt, "--bare", "--no-session-persistence",
               "--tools", "Bash", "--permission-mode", "default", "--settings", replay_home + "/settings.json",
               "--max-turns", "3", "--output-format", "stream-json", "--verbose",
+              "--debug", "--debug-file", replay_home + "/debug.log",
           ]
           try:
               proc = subprocess.run(
@@ -1193,7 +1194,7 @@ jobs:
           import json
           import sys
           data = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("claude_code_replay_framing=buffered-exact-prompt-fresh-same-home-request-compare")
+          print("claude_code_replay_framing=buffered-exact-flags-fresh-same-home-request-compare")
           print("claude_code_replay_exit=" + str(data.get("exit")))
           print("claude_code_replay_message_requests=" + str(data.get("messages")))
           print("claude_code_replay_tool_result_is_error=" + str(data.get("is_error")).lower())
