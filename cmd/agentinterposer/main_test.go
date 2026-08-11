@@ -68,6 +68,23 @@ func TestRunConfigCommandPrintsClaudeCodeEnvWithCustomGateway(t *testing.T) {
 	}
 }
 
+func TestRunConfigCommandPrintsOpenCodeConfig(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr strings.Builder
+	handled, exitCode := runConfigCommand(
+		[]string{"config", "opencode", "nvidia/nemotron-3-super-120b-a12b"},
+		&stdout,
+		&stderr,
+	)
+	if !handled || exitCode != 0 {
+		t.Fatalf("runConfigCommand() = handled:%v exit:%d stderr:%q", handled, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"npm": "@ai-sdk/openai-compatible"`) {
+		t.Fatalf("stdout missing OpenCode provider config:\n%s", stdout.String())
+	}
+}
+
 func TestRunConfigCommandRejectsUnknownClient(t *testing.T) {
 	t.Parallel()
 
@@ -76,7 +93,7 @@ func TestRunConfigCommandRejectsUnknownClient(t *testing.T) {
 	if !handled || exitCode != 2 {
 		t.Fatalf("runConfigCommand() = handled:%v exit:%d", handled, exitCode)
 	}
-	if !strings.Contains(stderr.String(), "codex|claude-code") {
+	if !strings.Contains(stderr.String(), "codex|claude-code|opencode") {
 		t.Fatalf("stderr = %q, want supported client usage", stderr.String())
 	}
 }

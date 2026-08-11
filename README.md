@@ -172,9 +172,10 @@ The binary can print secret-free client configuration without starting the gatew
 ```bash
 ./agentinterposer config codex nvidia/nemotron-3-super-120b-a12b
 ./agentinterposer config claude-code nvidia/nemotron-3-super-120b-a12b
+./agentinterposer config opencode nvidia/nemotron-3-super-120b-a12b
 ```
 
-The Codex helper prints a `~/.codex/config.toml` fragment using AgentInterposer's Responses endpoint and an `AGENTINTERPOSER_CLIENT_KEY` local placeholder. The Claude Code helper prints shell exports for `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL`. The placeholder client credentials are not upstream provider secrets; the real upstream bearer credential remains owned by the AgentInterposer server process.
+The Codex helper prints a `~/.codex/config.toml` fragment using AgentInterposer's Responses endpoint and an `AGENTINTERPOSER_CLIENT_KEY` local placeholder. The Claude Code helper prints shell exports for `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL`. The OpenCode helper prints an `opencode.json` custom provider using `@ai-sdk/openai-compatible`, the AgentInterposer `/v1` endpoint, an explicit model entry, and `{env:AGENTINTERPOSER_CLIENT_KEY}` for the local client credential. The placeholder client credentials are not upstream provider secrets; the real upstream bearer credential remains owned by the AgentInterposer server process.
 
 For a non-default gateway location, pass the root URL as the fourth argument, for example `https://gateway.example.test/agent`; the Codex renderer derives its `/v1` endpoint while Claude Code uses the gateway root.
 
@@ -202,7 +203,7 @@ Near-term work is intentionally compatibility-first:
 3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
 4. Expand the initial model capability profile and certification registry beyond the current Nemotron 3 Super evidence set.
 5. Integrate the conservative capability selector into explicit fallback-model and multi-provider routing configuration.
-6. Expand the initial Codex and Claude Code configuration helpers to OpenCode and compatible VS Code clients.
+6. Expand the initial Codex, Claude Code, and OpenCode configuration helpers to compatible VS Code clients.
 
 ## Security
 

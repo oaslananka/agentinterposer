@@ -57,12 +57,38 @@ func TestRenderClaudeCodeEnvUsesMessagesGateway(t *testing.T) {
 	}
 }
 
+func TestRenderOpenCodeConfigUsesOpenAICompatibleProvider(t *testing.T) {
+	t.Parallel()
+
+	got, err := RenderOpenCodeConfig(certifiedModel, "http://127.0.0.1:11435")
+	if err != nil {
+		t.Fatalf("RenderOpenCodeConfig() error = %v", err)
+	}
+	for _, want := range []string{
+		`"$schema": "https://opencode.ai/config.json"`,
+		`"npm": "@ai-sdk/openai-compatible"`,
+		`"baseURL": "http://127.0.0.1:11435/v1"`,
+		`"apiKey": "{env:AGENTINTERPOSER_CLIENT_KEY}"`,
+		`"nvidia/nemotron-3-super-120b-a12b"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("OpenCode config missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"NVIDIA_API_KEY", "DOPPLER_TOKEN", "sk-"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("OpenCode config contains forbidden secret-like value %q", forbidden)
+		}
+	}
+}
+
 func TestRenderAgentConfigRejectsNonHTTPGatewayURL(t *testing.T) {
 	t.Parallel()
 
 	for name, render := range map[string]func(string, string) (string, error){
 		"codex":       RenderCodexConfig,
 		"claude-code": RenderClaudeCodeEnv,
+		"opencode":    RenderOpenCodeConfig,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

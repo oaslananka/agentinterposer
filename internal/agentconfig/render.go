@@ -30,6 +30,35 @@ stream_max_retries = 0
 `, quoteConfig(model), quoteConfig(baseURL+"/v1")), nil
 }
 
+func RenderOpenCodeConfig(model, gatewayURL string) (string, error) {
+	model, baseURL, err := validateInputs(model, gatewayURL)
+	if err != nil {
+		return "", err
+	}
+
+	document := map[string]any{
+		"$schema": "https://opencode.ai/config.json",
+		"provider": map[string]any{
+			"agentinterposer": map[string]any{
+				"npm":  "@ai-sdk/openai-compatible",
+				"name": "AgentInterposer",
+				"options": map[string]any{
+					"baseURL": baseURL + "/v1",
+					"apiKey":  "{env:AGENTINTERPOSER_CLIENT_KEY}",
+				},
+				"models": map[string]any{
+					model: map[string]any{"name": model},
+				},
+			},
+		},
+	}
+	encoded, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode OpenCode config: %w", err)
+	}
+	return string(encoded) + "\n", nil
+}
+
 func RenderClaudeCodeEnv(model, gatewayURL string) (string, error) {
 	model, baseURL, err := validateInputs(model, gatewayURL)
 	if err != nil {

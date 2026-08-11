@@ -71,6 +71,8 @@ func runConfigCommand(args []string, stdout, stderr io.Writer) (bool, int) {
 		output, err = agentconfig.RenderCodexConfig(args[2], gatewayURL)
 	case "claude-code":
 		output, err = agentconfig.RenderClaudeCodeEnv(args[2], gatewayURL)
+	case "opencode":
+		output, err = agentconfig.RenderOpenCodeConfig(args[2], gatewayURL)
 	default:
 		printConfigUsage(stderr)
 		return true, 2
@@ -84,7 +86,7 @@ func runConfigCommand(args []string, stdout, stderr io.Writer) (bool, int) {
 }
 
 func printConfigUsage(w io.Writer) {
-	_, _ = io.WriteString(w, "usage: agentinterposer config <codex|claude-code> <model> [gateway-url]\n")
+	_, _ = io.WriteString(w, "usage: agentinterposer config <codex|claude-code|opencode> <model> [gateway-url]\n")
 }
 
 func newHandler(cfg config.Config) (http.Handler, error) {
