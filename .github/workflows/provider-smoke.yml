@@ -27,6 +27,7 @@ on:
           - responses-tool-fallback
           - messages
           - messages-vision
+          - responses-vision
           - messages-vision-fallback
           - chat-vision-fallback
           - messages-stream
@@ -673,7 +674,7 @@ jobs:
           echo 'messages_adapter_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe AgentInterposer vision routing
-        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'messages-vision-fallback' || inputs.scope == 'chat-vision-fallback' }}
+        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'responses-vision' || inputs.scope == 'messages-vision-fallback' || inputs.scope == 'chat-vision-fallback' }}
         id: messages_vision_gateway
         shell: bash
         env:
@@ -758,7 +759,22 @@ jobs:
           )
           image_data = base64.b64encode(png).decode("ascii")
           prompt = "Which half of the image is red? Reply with exactly LEFT or RIGHT and no other text."
-          if scope == "chat-vision-fallback":
+          if scope == "responses-vision":
+              payload = {
+                  "model": model,
+                  "max_output_tokens": 64,
+                  "input": [{
+                      "role": "user",
+                      "content": [
+                          {"type": "input_text", "text": prompt},
+                          {
+                              "type": "input_image",
+                              "image_url": "data:image/png;base64," + image_data,
+                          },
+                      ],
+                  }],
+              }
+          elif scope == "chat-vision-fallback":
               payload = {
                   "model": model,
                   "max_tokens": 8,
@@ -802,6 +818,8 @@ jobs:
           endpoint='http://127.0.0.1:11435/v1/messages'
           if [ "$SCOPE" = 'chat-vision-fallback' ]; then
             endpoint='http://127.0.0.1:11435/v1/chat/completions'
+          elif [ "$SCOPE" = 'responses-vision' ]; then
+            endpoint='http://127.0.0.1:11435/v1/responses'
           fi
 
           status="$(curl --silent --show-error \
@@ -830,7 +848,23 @@ jobs:
           if data.get("model") != expected_model:
               raise SystemExit("Vision response did not report the expected routed model")
 
-          if scope == "chat-vision-fallback":
+          if scope == "responses-vision":
+              if data.get("object") != "response" or not isinstance(data.get("output"), list):
+                  raise SystemExit("Responses vision response has an unexpected envelope")
+              texts = []
+              for item in data["output"]:
+                  if not isinstance(item, dict) or item.get("type") != "message":
+                      continue
+                  content = item.get("content")
+                  if not isinstance(content, list):
+                      continue
+                  for block in content:
+                      if isinstance(block, dict) and block.get("type") == "output_text" and isinstance(block.get("text"), str):
+                          texts.append(block["text"])
+              if not texts:
+                  raise SystemExit("Responses vision response contains no output_text")
+              text = "".join(texts).strip().upper()
+          elif scope == "chat-vision-fallback":
               choices = data.get("choices")
               if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
                   raise SystemExit("Chat vision response has an unexpected choices envelope")
@@ -1865,6 +1899,9 @@ jobs:
             elif [ "$SCOPE" = 'messages-vision' ]; then
               echo "- AgentInterposer Messages vision step: ${MESSAGES_VISION_OUTCOME:-not-run}"
               echo "- Randomized base64 image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'responses-vision' ]; then
+              echo "- AgentInterposer Responses vision step: ${MESSAGES_VISION_OUTCOME:-not-run}"
+              echo "- Randomized Responses input_image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'messages-vision-fallback' ]; then
               echo "- Requested model: ${MODEL}"
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
