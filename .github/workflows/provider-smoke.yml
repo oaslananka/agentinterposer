@@ -1061,7 +1061,9 @@ jobs:
               "NO_PROXY=127.0.0.1,localhost",
           ]
           cmd = [
-              "sudo", "-u", claude_user, "env", "-i", *child_env,
+              "sudo", "-u", claude_user, "--", "bash", "-c",
+              'cd "$1/work" && shift && exec env -i "$@"',
+              "bash", replay_home, *child_env,
               claude_bin, "-p", prompt, "--bare", "--no-session-persistence",
               "--tools", "Bash", "--permission-mode", "default", "--settings", replay_home + "/settings.json",
               "--max-turns", "3", "--output-format", "stream-json", "--verbose",
@@ -1069,7 +1071,7 @@ jobs:
           try:
               proc = subprocess.run(
                   cmd,
-                  cwd=replay_home + "/work",
+                  cwd="/tmp",
                   stdout=subprocess.DEVNULL,
                   stderr=subprocess.DEVNULL,
                   timeout=60,
