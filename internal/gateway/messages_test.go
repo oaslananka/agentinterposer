@@ -250,7 +250,102 @@ func assertMessageRoleContent(t *testing.T, value any, role, content string) {
 	}
 }
 
-func TestHandlerRejectsUnsupportedAnthropicContentBlockBeforeUpstream(t *testing.T) {
+func TestHandlerTranslatesAnthropicBase64ImageInputToChatCompletions(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest map[string]any
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-image","model":"nvidia/vision-test","choices":[{"message":{"role":"assistant","content":"image received"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2}}`))
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/vision-test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"text","text":"Describe this: "},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="},"cache_control":{"type":"ephemeral"}},{"type":"text","text":" briefly."}]}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	messages, ok := gotRequest["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("upstream messages = %#v", gotRequest["messages"])
+	}
+	message := messages[0].(map[string]any)
+	if message["role"] != "user" {
+		t.Fatalf("upstream role = %#v, want user", message["role"])
+	}
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 3 {
+		t.Fatalf("upstream multimodal content = %#v", message["content"])
+	}
+	first := content[0].(map[string]any)
+	image := content[1].(map[string]any)
+	last := content[2].(map[string]any)
+	if first["type"] != "text" || first["text"] != "Describe this: " {
+		t.Fatalf("first content part = %#v", first)
+	}
+	imageURL, ok := image["image_url"].(map[string]any)
+	if image["type"] != "image_url" || !ok || imageURL["url"] != "data:image/png;base64,iVBORw0KGgo=" {
+		t.Fatalf("image content part = %#v", image)
+	}
+	if last["type"] != "text" || last["text"] != " briefly." {
+		t.Fatalf("last content part = %#v", last)
+	}
+	encoded, err := json.Marshal(gotRequest)
+	if err != nil {
+		t.Fatalf("marshal upstream request: %v", err)
+	}
+	if strings.Contains(string(encoded), "cache_control") {
+		t.Fatalf("translated request leaked Anthropic-only cache_control: %s", encoded)
+	}
+}
+
+func TestHandlerRejectsInvalidAnthropicBase64ImageBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"unexpected","model":"nvidia/vision-test","choices":[{"message":{"role":"assistant","content":"unexpected"},"finish_reason":"stop"}]}`))
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/vision-test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"not-base64!"}}]}]}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+	if !strings.Contains(response.Body.String(), "base64 image data is invalid") {
+		t.Fatalf("body = %s, want invalid base64 error", response.Body.String())
+	}
+}
+
+func TestHandlerRejectsUnsupportedAnthropicImageMediaTypeBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"unexpected","model":"nvidia/vision-test","choices":[{"message":{"role":"assistant","content":"unexpected"},"finish_reason":"stop"}]}`))
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/vision-test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"application/pdf","data":"AA=="}}]}]}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+	if !strings.Contains(response.Body.String(), "unsupported image media_type") {
+		t.Fatalf("body = %s, want media_type error", response.Body.String())
+	}
+}
+
+func TestHandlerRejectsUnsupportedAnthropicImageSourceBeforeUpstream(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
@@ -259,7 +354,7 @@ func TestHandlerRejectsUnsupportedAnthropicContentBlockBeforeUpstream(t *testing
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`)
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.invalid/image.png"}}]}]}`)
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
@@ -267,8 +362,8 @@ func TestHandlerRejectsUnsupportedAnthropicContentBlockBeforeUpstream(t *testing
 	if calls.Load() != 0 {
 		t.Fatalf("upstream calls = %d, want 0", calls.Load())
 	}
-	if !strings.Contains(response.Body.String(), "unsupported user content block") {
-		t.Fatalf("body = %s, want unsupported block error", response.Body.String())
+	if !strings.Contains(response.Body.String(), "unsupported image source type") {
+		t.Fatalf("body = %s, want unsupported image source error", response.Body.String())
 	}
 }
 
