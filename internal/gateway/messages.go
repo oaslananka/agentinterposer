@@ -272,11 +272,16 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	}
 
 	toolNames := make(map[string]string)
+	var pendingToolUses map[string]string
 	for _, message := range request.Messages {
 		messages, names, err := translateAnthropicMessage(message)
 		if err != nil {
 			return chatCompletionRequest{}, err
 		}
+		if err := validateToolResultSequence(pendingToolUses, message.Role, messages); err != nil {
+			return chatCompletionRequest{}, err
+		}
+		pendingToolUses = names
 		for id, name := range names {
 			toolNames[id] = name
 		}
@@ -286,6 +291,9 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 			}
 		}
 		translated.Messages = append(translated.Messages, messages...)
+	}
+	if len(pendingToolUses) > 0 {
+		return chatCompletionRequest{}, errors.New("assistant tool_use blocks require an immediately following user tool_result message for every tool_use")
 	}
 
 	for _, tool := range request.Tools {
@@ -342,6 +350,37 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	}
 
 	return translated, nil
+}
+
+func validateToolResultSequence(pendingToolUses map[string]string, messageRole string, messages []chatMessage) error {
+	resultIDs := make([]string, 0)
+	for _, message := range messages {
+		if message.Role == "tool" {
+			resultIDs = append(resultIDs, message.ToolCallID)
+		}
+	}
+
+	if len(pendingToolUses) == 0 {
+		if len(resultIDs) > 0 {
+			return errors.New("tool_result must reference a preceding tool_use in the immediately prior assistant message")
+		}
+		return nil
+	}
+	if messageRole != "user" || len(resultIDs) != len(pendingToolUses) {
+		return errors.New("tool_result message must immediately follow assistant tool_use and include every tool_use id")
+	}
+
+	seen := make(map[string]struct{}, len(resultIDs))
+	for _, id := range resultIDs {
+		if _, duplicate := seen[id]; duplicate {
+			return errors.New("tool_result ids must match every tool_use id from the immediately preceding assistant message")
+		}
+		seen[id] = struct{}{}
+		if _, ok := pendingToolUses[id]; !ok {
+			return errors.New("tool_result ids must match every tool_use id from the immediately preceding assistant message")
+		}
+	}
+	return nil
 }
 
 func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, map[string]string, error) {
