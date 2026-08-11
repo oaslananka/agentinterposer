@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for both a single shell-tool round trip and a dependent two-tool loop, plus Claude Code CLI `2.1.226` over Messages for a real single-tool round trip, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for both a single shell-tool round trip and a dependent two-tool loop, plus Claude Code CLI `2.1.226` over Messages for a real single-tool round trip, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -24,7 +24,7 @@ The first vertical slice supports:
 - `GET /v1/models` for upstream model discovery
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
-- `POST /v1/messages` for Anthropic-compatible text, base64 user image inputs, and custom client-tool requests, including SSE streaming
+- `POST /v1/messages` for Anthropic-compatible text, base64 and URL user image inputs, and custom client-tool requests, including SSE streaming
 - OpenAI-compatible request/response passthrough to an upstream provider without JSON translation
 - server-owned upstream bearer authentication (client credentials are not forwarded)
 - bounded upstream concurrency (default: `3`)
@@ -57,7 +57,7 @@ Coding agent / OpenAI-compatible client
         (NVIDIA by default)
 ```
 
-OpenAI Responses uses native passthrough through the same reliability core. The Anthropic Messages path translates text, base64 user image inputs, and custom client-tool requests to OpenAI-compatible Chat Completions when the selected upstream does not expose a usable hosted `/v1/messages` endpoint. Base64 image blocks are mapped to OpenAI-compatible `image_url` content parts using `data:` URLs while preserving surrounding text-part order. Text deltas are flushed as Anthropic SSE events. Streaming tool-call arguments are buffered until they form valid JSON, then emitted as a `tool_use` block with `input_json_delta`. URL/file image sources, image-bearing tool results, thinking blocks, and broader Anthropic-specific features remain outside this adapter slice.
+OpenAI Responses uses native passthrough through the same reliability core. The Anthropic Messages path translates text, base64 and URL user image inputs, and custom client-tool requests to OpenAI-compatible Chat Completions when the selected upstream does not expose a usable hosted `/v1/messages` endpoint. Base64 image blocks are mapped to OpenAI-compatible `image_url` content parts using `data:` URLs, while URL image sources are forwarded as validated absolute HTTP(S) image URLs; surrounding text-part order is preserved. Text deltas are flushed as Anthropic SSE events. Streaming tool-call arguments are buffered until they form valid JSON, then emitted as a `tool_use` block with `input_json_delta`. Files API image sources, image-bearing tool results, thinking blocks, and broader Anthropic-specific features remain outside this adapter slice.
 
 ## Quick start
 
@@ -155,7 +155,7 @@ curl --no-buffer http://127.0.0.1:11435/v1/messages \
   }'
 ```
 
-This adapter covers text, base64 user image blocks, custom client `tools`, `tool_choice`, `tool_use`, and successful text `tool_result` blocks in non-streaming mode, plus SSE streaming for text and custom client tool calls. In streaming mode, text deltas are forwarded incrementally while tool arguments are buffered until valid JSON is available and then emitted as a single valid `input_json_delta`. The adapter requests terminal usage from the upstream Chat Completions stream; `message_start` begins with zero counters because hosted Chat Completions supplies authoritative token usage at the terminal usage chunk, and the final `message_delta` reports those cumulative counts. `stop_sequences`, URL/file image sources, image-bearing tool results, thinking blocks, and server tools are rejected rather than silently translated. Failed `tool_result` blocks with `is_error: true` are preserved for the OpenAI-compatible upstream as a versioned AgentInterposer JSON error envelope inside the standard tool-message `content`, because Chat Completions has no separate structured tool-error flag. Manual Provider Smoke scopes `messages` and `messages-stream` verify the non-streaming round trip and the real NVIDIA-hosted text/tool SSE paths respectively.
+This adapter covers text, base64 and URL user image blocks, custom client `tools`, `tool_choice`, `tool_use`, and successful text `tool_result` blocks in non-streaming mode, plus SSE streaming for text and custom client tool calls. In streaming mode, text deltas are forwarded incrementally while tool arguments are buffered until valid JSON is available and then emitted as a single valid `input_json_delta`. The adapter requests terminal usage from the upstream Chat Completions stream; `message_start` begins with zero counters because hosted Chat Completions supplies authoritative token usage at the terminal usage chunk, and the final `message_delta` reports those cumulative counts. `stop_sequences`, Files API image sources, image-bearing tool results, thinking blocks, and server tools are rejected rather than silently translated. Failed `tool_result` blocks with `is_error: true` are preserved for the OpenAI-compatible upstream as a versioned AgentInterposer JSON error envelope inside the standard tool-message `content`, because Chat Completions has no separate structured tool-error flag. Manual Provider Smoke scopes `messages` and `messages-stream` verify the non-streaming round trip and the real NVIDIA-hosted text/tool SSE paths respectively.
 
 The manual `scope=claude-code` Provider Smoke profile additionally verifies Claude Code CLI `2.1.226` -> AgentInterposer -> NVIDIA hosted inference -> Bash `tool_use` -> successful `tool_result` -> final response using `nvidia/nemotron-3-super-120b-a12b`. The separate `scope=claude-code-error` profile verifies a failing Bash tool result is preserved, returned through the Messages adapter, and followed by a successful recovery tool turn. The certification is intentionally limited to this client version, model, and custom Bash-tool flow; broader Claude Code features and other models remain uncertified.
 
@@ -179,7 +179,7 @@ For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_
 Near-term work is intentionally compatibility-first:
 
 1. Broaden Codex/Responses certification beyond the current single-tool and dependent two-tool Nemotron 3 Super profiles to additional tool types, longer agent loops, Codex versions, and models.
-2. Broaden the Anthropic Messages adapter beyond the current text/base64-image/custom-client-tool slice, including URL/file image sources, image-bearing tool results, thinking, and richer non-text result semantics.
+2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification across additional client versions, models, and parallel/multi-turn tool patterns.
 4. Model capability profiles and compatibility certification tests.
 5. Capability-aware fallback and provider routing.

@@ -307,6 +307,70 @@ func assertTranslatedBase64ImageRequest(t *testing.T, gotRequest map[string]any)
 	}
 }
 
+func TestHandlerTranslatesAnthropicURLImageInputToChatCompletions(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest map[string]any
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-url-image","model":"nvidia/vision-test","choices":[{"message":{"role":"assistant","content":"image received"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2}}`))
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/vision-test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://images.example.com/probe.webp"}},{"type":"text","text":"Describe this image."}]}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	assertTranslatedURLImageRequest(t, gotRequest)
+}
+
+func assertTranslatedURLImageRequest(t *testing.T, gotRequest map[string]any) {
+	t.Helper()
+
+	messages, ok := gotRequest["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("upstream messages = %#v", gotRequest["messages"])
+	}
+	message := messages[0].(map[string]any)
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 2 {
+		t.Fatalf("upstream multimodal content = %#v", message["content"])
+	}
+	image := content[0].(map[string]any)
+	imageURL, ok := image["image_url"].(map[string]any)
+	if image["type"] != "image_url" || !ok || imageURL["url"] != "https://images.example.com/probe.webp" {
+		t.Fatalf("image content part = %#v", image)
+	}
+	text := content[1].(map[string]any)
+	if text["type"] != "text" || text["text"] != "Describe this image." {
+		t.Fatalf("text content part = %#v", text)
+	}
+}
+
+func TestHandlerRejectsNonHTTPAnthropicImageURLBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"file:///etc/passwd"}}]}]}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+	if !strings.Contains(response.Body.String(), "image URL must be an absolute HTTP(S) URL") {
+		t.Fatalf("body = %s, want URL validation error", response.Body.String())
+	}
+}
+
 func TestHandlerRejectsInvalidAnthropicBase64ImageBeforeUpstream(t *testing.T) {
 	t.Parallel()
 
@@ -351,7 +415,7 @@ func TestHandlerRejectsUnsupportedAnthropicImageMediaTypeBeforeUpstream(t *testi
 	}
 }
 
-func TestHandlerRejectsUnsupportedAnthropicImageSourceBeforeUpstream(t *testing.T) {
+func TestHandlerRejectsUnsupportedAnthropicFileImageSourceBeforeUpstream(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
@@ -360,7 +424,7 @@ func TestHandlerRejectsUnsupportedAnthropicImageSourceBeforeUpstream(t *testing.
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.invalid/image.png"}}]}]}`)
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"file","file_id":"file_test"}}]}]}`)
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
