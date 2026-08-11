@@ -100,6 +100,26 @@ func TestHandlerTranslatesAnthropicTextMessageToChatCompletions(t *testing.T) {
 	}
 }
 
+func TestTranslateAnthropicUserContentRejectsTextBeforeToolResult(t *testing.T) {
+	t.Parallel()
+
+	message := anthropicInputMessage{
+		Role: "user",
+		Content: json.RawMessage(`[
+			{"type":"text","text":"before"},
+			{"type":"tool_result","tool_use_id":"call_probe","content":"tool output"}
+		]`),
+	}
+
+	_, _, err := translateAnthropicMessage(message)
+	if err == nil {
+		t.Fatal("translateAnthropicMessage() accepted text before tool_result")
+	}
+	if !strings.Contains(err.Error(), "tool_result") || !strings.Contains(err.Error(), "before text") {
+		t.Fatalf("error = %q, want tool_result ordering error", err)
+	}
+}
+
 func TestHandlerTranslatesAnthropicToolUseAndToolResultRoundTrip(t *testing.T) {
 	t.Parallel()
 

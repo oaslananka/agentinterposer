@@ -409,14 +409,19 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 
 	var result []chatMessage
 	var text strings.Builder
+	seenText := false
 	for _, block := range blocks {
 		if err := validateAnthropicCacheControl(block.CacheControl); err != nil {
 			return nil, nil, fmt.Errorf("user cache_control: %w", err)
 		}
 		switch block.Type {
 		case "text":
+			seenText = true
 			text.WriteString(block.Text)
 		case "tool_result":
+			if seenText {
+				return nil, nil, errors.New("tool_result blocks must appear before text blocks in user content")
+			}
 			if block.ToolUseID == "" {
 				return nil, nil, errors.New("tool_result requires tool_use_id")
 			}
