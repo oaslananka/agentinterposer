@@ -267,6 +267,12 @@ func TestHandlerTranslatesAnthropicBase64ImageInputToChatCompletions(t *testing.
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
 
+	assertTranslatedBase64ImageRequest(t, gotRequest)
+}
+
+func assertTranslatedBase64ImageRequest(t *testing.T, gotRequest map[string]any) {
+	t.Helper()
+
 	messages, ok := gotRequest["messages"].([]any)
 	if !ok || len(messages) != 1 {
 		t.Fatalf("upstream messages = %#v", gotRequest["messages"])
