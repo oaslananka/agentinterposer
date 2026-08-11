@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses and Claude Code CLI `2.1.226` over Messages with `nvidia/nemotron-3-super-120b-a12b` for real single-tool round trips through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for both a single shell-tool round trip and a dependent two-tool loop, plus Claude Code CLI `2.1.226` over Messages for a real single-tool round trip, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -30,7 +30,7 @@ The first vertical slice supports:
 - bounded upstream concurrency (default: `3`)
 - exponential retry for `429`, `500`, `502`, `503`, and `504` responses
 - incremental flushing for `text/event-stream` responses
-- manual Codex CLI `0.147.0` certification for a Responses shell-tool round trip with `nvidia/nemotron-3-super-120b-a12b`
+- manual Codex CLI `0.147.0` certification for a Responses shell-tool round trip and a dependent two-tool loop with `nvidia/nemotron-3-super-120b-a12b`
 - manual Claude Code CLI `2.1.226` certification for a Messages Bash-tool round trip with `nvidia/nemotron-3-super-120b-a12b`
 - configurable request-size protection (default: `32 MiB`)
 - safe loopback binding by default (`127.0.0.1:11435`)
@@ -126,7 +126,7 @@ curl http://127.0.0.1:11435/v1/responses \
   }'
 ```
 
-This establishes the transport needed by Responses-based clients. The manual `Provider Smoke` workflow can also run the current `scope=codex` certification path: Codex CLI `0.147.0` -> AgentInterposer -> NVIDIA hosted Responses -> shell function call -> tool output -> final response. Other Codex versions, models, tool surfaces, and longer agent loops remain uncertified.
+This establishes the transport needed by Responses-based clients. The manual `Provider Smoke` workflow can run `scope=codex` for the current single shell-tool certification path and `scope=codex-loop` for a dependent two-tool path where the second shell result must be the SHA-256 digest of the first tool's unpredictable UUID output. Both use Codex CLI `0.147.0` -> AgentInterposer -> NVIDIA hosted Responses with `nvidia/nemotron-3-super-120b-a12b`. Other Codex versions, models, broader tool surfaces, and longer agent loops remain uncertified.
 
 Send an Anthropic Messages request:
 
@@ -178,7 +178,7 @@ For a non-NVIDIA OpenAI-compatible upstream, set both `AGENTINTERPOSER_UPSTREAM_
 
 Near-term work is intentionally compatibility-first:
 
-1. Broaden Codex/Responses certification beyond the current single-shell-tool Nemotron 3 Super profile to additional tools, agent loops, Codex versions, and models.
+1. Broaden Codex/Responses certification beyond the current single-tool and dependent two-tool Nemotron 3 Super profiles to additional tool types, longer agent loops, Codex versions, and models.
 2. Broaden the Anthropic Messages adapter beyond the current text/custom-client-tool slice, including image/thinking and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification across additional client versions, models, and parallel/multi-turn tool patterns.
 4. Model capability profiles and compatibility certification tests.
