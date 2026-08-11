@@ -19,6 +19,12 @@ const (
 	contentTypeHeader            = "Content-Type"
 )
 
+type ModelRoute struct {
+	Model               string
+	UpstreamURL         string
+	UpstreamBearerToken string
+}
+
 type Config struct {
 	UpstreamURL         string
 	UpstreamBearerToken string
@@ -27,6 +33,12 @@ type Config struct {
 	RetryBaseDelay      time.Duration
 	MaxRequestBytes     int64
 	FallbackModels      []string
+	ModelRoutes         []ModelRoute
+}
+
+type upstreamRoute struct {
+	upstreamURL         string
+	upstreamBearerToken string
 }
 
 type handler struct {
@@ -38,6 +50,7 @@ type handler struct {
 	maxRetries          int
 	retryBaseDelay      time.Duration
 	fallbackModels      []string
+	modelRoutes         map[string]upstreamRoute
 }
 
 func NewHandler(cfg Config) (http.Handler, error) {
@@ -47,6 +60,10 @@ func NewHandler(cfg Config) (http.Handler, error) {
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 			return nil, fmt.Errorf("invalid upstream URL %q", cfg.UpstreamURL)
 		}
+	}
+	modelRoutes, err := normalizeModelRoutes(cfg.ModelRoutes)
+	if err != nil {
+		return nil, err
 	}
 
 	maxConcurrent := cfg.MaxConcurrent
@@ -71,6 +88,7 @@ func NewHandler(cfg Config) (http.Handler, error) {
 		maxRetries:          max(cfg.MaxRetries, 0),
 		retryBaseDelay:      retryBaseDelay,
 		fallbackModels:      append([]string(nil), cfg.FallbackModels...),
+		modelRoutes:         modelRoutes,
 	}
 
 	mux := http.NewServeMux()
@@ -80,6 +98,40 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) { h.handleProxy(w, r, "/responses") })
 	mux.HandleFunc("POST /v1/messages", h.handleMessages)
 	return mux, nil
+}
+
+func normalizeModelRouteURL(raw string) (string, error) {
+	value := strings.TrimRight(strings.TrimSpace(raw), "/")
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("upstream URL must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	return value, nil
+}
+
+func normalizeModelRoutes(routes []ModelRoute) (map[string]upstreamRoute, error) {
+	if len(routes) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]upstreamRoute, len(routes))
+	for _, route := range routes {
+		model := strings.TrimSpace(route.Model)
+		if model == "" {
+			return nil, errors.New("model route model must be non-empty")
+		}
+		if _, duplicate := result[model]; duplicate {
+			return nil, fmt.Errorf("duplicate model route for %q", model)
+		}
+		upstreamURL, err := normalizeModelRouteURL(route.UpstreamURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid upstream URL for model route %q", model)
+		}
+		if strings.TrimSpace(route.UpstreamBearerToken) == "" {
+			return nil, fmt.Errorf("missing bearer token for model route %q", model)
+		}
+		result[model] = upstreamRoute{upstreamURL: upstreamURL, upstreamBearerToken: route.UpstreamBearerToken}
+	}
+	return result, nil
 }
 
 func (h *handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -396,17 +448,38 @@ func (h *handler) newUpstreamRequest(r *http.Request, method string, body []byte
 		requestBody = bytes.NewReader(body)
 	}
 
-	request, err := http.NewRequestWithContext(r.Context(), method, upstreamEndpoint(h.upstreamURL, upstreamPath), requestBody)
+	upstreamURL := h.upstreamURL
+	upstreamBearerToken := h.upstreamBearerToken
+	if route, ok := h.modelRouteForBody(body); ok {
+		upstreamURL = route.upstreamURL
+		upstreamBearerToken = route.upstreamBearerToken
+	}
+
+	request, err := http.NewRequestWithContext(r.Context(), method, upstreamEndpoint(upstreamURL, upstreamPath), requestBody)
 	if err != nil {
 		return nil, err
 	}
 	if method == http.MethodPost {
 		request.Header.Set(contentTypeHeader, "application/json")
 	}
-	if h.upstreamBearerToken != "" {
-		request.Header.Set("Authorization", "Bearer "+h.upstreamBearerToken)
+	if upstreamBearerToken != "" {
+		request.Header.Set("Authorization", "Bearer "+upstreamBearerToken)
 	}
 	return request, nil
+}
+
+func (h *handler) modelRouteForBody(body []byte) (upstreamRoute, bool) {
+	if len(h.modelRoutes) == 0 || len(body) == 0 {
+		return upstreamRoute{}, false
+	}
+	var envelope struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return upstreamRoute{}, false
+	}
+	route, ok := h.modelRoutes[envelope.Model]
+	return route, ok
 }
 
 func upstreamEndpoint(baseURL, path string) string {

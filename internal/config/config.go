@@ -1,7 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -17,6 +21,12 @@ const (
 	defaultMaxRequestBytes int64 = 32 << 20
 )
 
+type ModelRoute struct {
+	Model               string
+	UpstreamURL         string
+	UpstreamBearerToken string
+}
+
 type Config struct {
 	ListenAddr          string
 	UpstreamURL         string
@@ -26,6 +36,7 @@ type Config struct {
 	RetryBaseDelay      time.Duration
 	MaxRequestBytes     int64
 	FallbackModels      []string
+	ModelRoutes         []ModelRoute
 }
 
 func LoadFromEnv() (Config, error) {
@@ -49,6 +60,9 @@ func Load(getenv func(string) string) (Config, error) {
 
 	var err error
 	if cfg.FallbackModels, err = fallbackModels(getenv("AGENTINTERPOSER_FALLBACK_MODELS")); err != nil {
+		return Config{}, err
+	}
+	if cfg.ModelRoutes, err = parseModelRoutes(getenv("AGENTINTERPOSER_MODEL_ROUTES"), getenv); err != nil {
 		return Config{}, err
 	}
 	if cfg.MaxConcurrent, err = positiveInt(getenv("AGENTINTERPOSER_MAX_CONCURRENT"), defaultMaxConcurrent); err != nil {
@@ -130,4 +144,86 @@ func fallbackModels(raw string) ([]string, error) {
 		models = append(models, model)
 	}
 	return models, nil
+}
+
+type modelRouteConfig struct {
+	Model          string `json:"model"`
+	UpstreamURL    string `json:"upstream_url"`
+	BearerTokenEnv string `json:"bearer_token_env"`
+}
+
+func parseModelRoutes(raw string, getenv func(string) string) ([]ModelRoute, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var configured []modelRouteConfig
+	if err := decoder.Decode(&configured); err != nil {
+		return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES must be a JSON array of model routes: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("AGENTINTERPOSER_MODEL_ROUTES must contain exactly one JSON array")
+	}
+
+	routes := make([]ModelRoute, 0, len(configured))
+	seen := make(map[string]struct{}, len(configured))
+	for _, item := range configured {
+		model := strings.TrimSpace(item.Model)
+		if model == "" {
+			return nil, errors.New("AGENTINTERPOSER_MODEL_ROUTES model must be non-empty")
+		}
+		if _, duplicate := seen[model]; duplicate {
+			return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES contains duplicate model %q", model)
+		}
+		seen[model] = struct{}{}
+
+		upstreamURL, err := normalizedHTTPURL(item.UpstreamURL)
+		if err != nil {
+			return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES model %q has invalid upstream_url", model)
+		}
+		envName := strings.TrimSpace(item.BearerTokenEnv)
+		if !validEnvironmentName(envName) {
+			return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES model %q has invalid bearer_token_env", model)
+		}
+		token := getenv(envName)
+		if strings.TrimSpace(token) == "" {
+			return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES bearer token env %s is not set", envName)
+		}
+		routes = append(routes, ModelRoute{
+			Model:               model,
+			UpstreamURL:         upstreamURL,
+			UpstreamBearerToken: token,
+		})
+	}
+	return routes, nil
+}
+
+func normalizedHTTPURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("URL must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	return strings.TrimRight(value, "/"), nil
+}
+
+func validEnvironmentName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if i == 0 {
+			if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
+				return false
+			}
+			continue
+		}
+		if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }

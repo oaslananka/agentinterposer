@@ -130,6 +130,14 @@ func printConfigUsage(w io.Writer) {
 }
 
 func newHandler(cfg config.Config) (http.Handler, error) {
+	modelRoutes := make([]gateway.ModelRoute, 0, len(cfg.ModelRoutes))
+	for _, route := range cfg.ModelRoutes {
+		modelRoutes = append(modelRoutes, gateway.ModelRoute{
+			Model:               route.Model,
+			UpstreamURL:         route.UpstreamURL,
+			UpstreamBearerToken: route.UpstreamBearerToken,
+		})
+	}
 	return gateway.NewHandler(gateway.Config{
 		UpstreamURL:         cfg.UpstreamURL,
 		UpstreamBearerToken: cfg.UpstreamBearerToken,
@@ -138,6 +146,7 @@ func newHandler(cfg config.Config) (http.Handler, error) {
 		RetryBaseDelay:      cfg.RetryBaseDelay,
 		MaxRequestBytes:     cfg.MaxRequestBytes,
 		FallbackModels:      cfg.FallbackModels,
+		ModelRoutes:         modelRoutes,
 	})
 }
 
