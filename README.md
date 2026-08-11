@@ -41,7 +41,7 @@ The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com
 
 AgentInterposer keeps explicit built-in compatibility assertions for model/client combinations that have reproducible certification evidence. The current `nvidia/nemotron-3-super-120b-a12b` profile asserts Chat Completions, native Responses, and tool calling, and records the hosted Codex CLI `0.147.0` and Claude Code CLI `2.1.226` certification scenarios described below. Vision input is intentionally not asserted for that model.
 
-Profiles are positive assertions, not guesses: absence of a capability means **uncertified/unknown**, not a universal claim that the provider can never support it. Future capability-aware routing therefore has a conservative source of truth instead of inferring support from model names.
+Profiles are positive assertions, not guesses: absence of a capability means **uncertified/unknown**, not a universal claim that the provider can never support it. The compatibility layer can conservatively select the first candidate model whose profile asserts every required capability while skipping unknown or incomplete candidates; automatic request rewriting is not enabled yet.
 
 ## Architecture
 
@@ -188,7 +188,7 @@ Near-term work is intentionally compatibility-first:
 2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
 4. Expand the initial model capability profile and certification registry beyond the current Nemotron 3 Super evidence set.
-5. Capability-aware fallback and provider routing.
+5. Integrate the conservative capability selector into explicit fallback-model and multi-provider routing configuration.
 6. Agent configuration helpers for Codex, Claude Code, OpenCode, and compatible VS Code clients.
 
 ## Security
