@@ -24,6 +24,7 @@ type Config struct {
 	MaxRetries          int
 	RetryBaseDelay      time.Duration
 	MaxRequestBytes     int64
+	FallbackModels      []string
 }
 
 type handler struct {
@@ -34,6 +35,7 @@ type handler struct {
 	client              *http.Client
 	maxRetries          int
 	retryBaseDelay      time.Duration
+	fallbackModels      []string
 }
 
 func NewHandler(cfg Config) (http.Handler, error) {
@@ -66,6 +68,7 @@ func NewHandler(cfg Config) (http.Handler, error) {
 		client:              &http.Client{},
 		maxRetries:          max(cfg.MaxRetries, 0),
 		retryBaseDelay:      retryBaseDelay,
+		fallbackModels:      append([]string(nil), cfg.FallbackModels...),
 	}
 
 	mux := http.NewServeMux()

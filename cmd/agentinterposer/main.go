@@ -137,6 +137,7 @@ func newHandler(cfg config.Config) (http.Handler, error) {
 		MaxRetries:          cfg.MaxRetries,
 		RetryBaseDelay:      cfg.RetryBaseDelay,
 		MaxRequestBytes:     cfg.MaxRequestBytes,
+		FallbackModels:      cfg.FallbackModels,
 	})
 }
 

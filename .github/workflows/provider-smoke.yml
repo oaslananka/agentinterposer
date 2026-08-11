@@ -8,6 +8,11 @@ on:
         required: true
         default: nvidia/nemotron-3-super-120b-a12b
         type: string
+      fallback_model:
+        description: Optional same-upstream fallback model for routing probes
+        required: false
+        default: ""
+        type: string
       scope:
         description: Smoke scope
         required: true
@@ -19,6 +24,7 @@ on:
           - models
           - messages
           - messages-vision
+          - messages-vision-fallback
           - messages-stream
           - claude-code
           - claude-code-error
@@ -574,12 +580,14 @@ jobs:
           echo 'messages_adapter_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe AgentInterposer Messages vision adapter
-        if: ${{ inputs.scope == 'messages-vision' }}
+        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'messages-vision-fallback' }}
         id: messages_vision_gateway
         shell: bash
         env:
           NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
+          FALLBACK_MODEL: ${{ inputs.fallback_model }}
+          SCOPE: ${{ inputs.scope }}
         run: |
           set -euo pipefail
           binary="$RUNNER_TEMP/agentinterposer-messages-vision"
@@ -598,8 +606,18 @@ jobs:
           }
           trap cleanup EXIT
 
+          fallback_models=''
+          if [ "$SCOPE" = 'messages-vision-fallback' ]; then
+            if [ -z "$FALLBACK_MODEL" ]; then
+              echo 'messages-vision-fallback requires fallback_model.' >&2
+              exit 2
+            fi
+            fallback_models="$FALLBACK_MODEL"
+          fi
+
           go build -trimpath -o "$binary" ./cmd/agentinterposer
           AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            AGENTINTERPOSER_FALLBACK_MODELS="$fallback_models" \
             NVIDIA_API_KEY="$NVIDIA_API_KEY" \
             "$binary" >"$log" 2>&1 &
           pid=$!
@@ -689,15 +707,18 @@ jobs:
             exit 1
           fi
 
-          python3 - "$response" "$expected" <<'PY'
+          python3 - "$response" "$expected" "$SCOPE" "$MODEL" "$FALLBACK_MODEL" <<'PY'
           import json
           import re
           import sys
 
-          response_path, expected_path = sys.argv[1:]
+          response_path, expected_path, scope, model, fallback_model = sys.argv[1:]
           data = json.load(open(response_path, encoding="utf-8"))
           if data.get("type") != "message" or data.get("role") != "assistant":
               raise SystemExit("Messages vision response has an unexpected envelope")
+          expected_model = fallback_model if scope == "messages-vision-fallback" else model
+          if data.get("model") != expected_model:
+              raise SystemExit("Messages vision response did not report the expected routed model")
           content = data.get("content")
           if not isinstance(content, list):
               raise SystemExit("Messages vision response content is not a list")
@@ -1645,6 +1666,7 @@ jobs:
         shell: bash
         env:
           MODEL: ${{ inputs.model }}
+          FALLBACK_MODEL: ${{ inputs.fallback_model }}
           SCOPE: ${{ inputs.scope }}
           CHAT_OUTCOME: ${{ steps.chat.outcome }}
           MODELS_OUTCOME: ${{ steps.models.outcome }}
@@ -1701,6 +1723,11 @@ jobs:
             elif [ "$SCOPE" = 'messages-vision' ]; then
               echo "- AgentInterposer Messages vision step: ${MESSAGES_VISION_OUTCOME:-not-run}"
               echo "- Randomized base64 image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'messages-vision-fallback' ]; then
+              echo "- Requested model: ${MODEL}"
+              echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
+              echo "- AgentInterposer Messages vision fallback step: ${MESSAGES_VISION_OUTCOME:-not-run}"
+              echo "- Routed randomized base64 image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'messages-stream' ]; then
               echo "- AgentInterposer Messages streaming step: ${MESSAGES_STREAM_OUTCOME:-not-run}"
               echo "- Messages text + tool SSE: ${MESSAGES_STREAM_VERIFIED:-not-verified}"
