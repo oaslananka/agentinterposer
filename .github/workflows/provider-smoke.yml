@@ -22,6 +22,7 @@ on:
           - baseline
           - full
           - models
+          - model-route
           - responses-fallback
           - responses-structured-fallback
           - messages
@@ -227,6 +228,92 @@ jobs:
               raise SystemExit("Chat Completions response is missing choices[]")
           print("chat_completions_schema=ok")
           PY
+
+      - name: Probe AgentInterposer model route
+        if: ${{ inputs.scope == 'model-route' }}
+        id: model_route
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/agentinterposer-model-route"
+          log="$RUNNER_TEMP/agentinterposer-model-route.log"
+          body="$RUNNER_TEMP/agentinterposer-model-route-response.json"
+          pid=''
+
+          cleanup() {
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+            rm -f "$binary" "$log" "$body"
+          }
+          trap cleanup EXIT
+
+          route_json="$(python3 - <<'PY'
+          import json
+          import os
+
+          print(json.dumps([{
+              "model": os.environ["MODEL"],
+              "upstream_url": "https://integrate.api.nvidia.com/v1",
+              "bearer_token_env": "NVIDIA_API_KEY",
+          }], separators=(",", ":")))
+          PY
+          )"
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            AGENTINTERPOSER_UPSTREAM_URL='http://127.0.0.1:9' \
+            AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN='unused-default-placeholder' \
+            AGENTINTERPOSER_MODEL_ROUTES="$route_json" \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$log" 2>&1 &
+          pid=$!
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for the model-route probe.' >&2
+            exit 1
+          fi
+
+          status="$(curl --silent --show-error \
+            --max-time 120 \
+            --output "$body" \
+            --write-out '%{http_code}' \
+            --request POST \
+            'http://127.0.0.1:11435/v1/chat/completions' \
+            --header 'Content-Type: application/json' \
+            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "messages": [{"role": "user", "content": "Reply only with OK"}], "max_tokens": 16, "stream": False}, separators=(",", ":")))')")"
+          echo "agentinterposer_model_route_http=${status}"
+          if [[ ! "$status" =~ ^2 ]]; then
+            echo 'AgentInterposer model-route probe did not return 2xx.' >&2
+            exit 1
+          fi
+
+          python3 - "$body" "$MODEL" <<'PY'
+          import json
+          import sys
+
+          body_path, model = sys.argv[1:]
+          data = json.load(open(body_path, encoding="utf-8"))
+          if data.get("model") != model:
+              raise SystemExit("Model-route probe response did not report the configured model")
+          choices = data.get("choices")
+          if not isinstance(choices, list) or not choices:
+              raise SystemExit("Model-route probe response contains no choices")
+          print("agentinterposer_model_route_schema=ok")
+          PY
+          echo 'model_route_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe Responses API
         if: ${{ inputs.scope == 'full' }}
@@ -1753,6 +1840,8 @@ jobs:
           RESPONSES_SUPPORTED: ${{ steps.responses.outputs.responses_supported }}
           MESSAGES_SUPPORTED: ${{ steps.messages.outputs.messages_supported }}
           GATEWAY_OUTCOME: ${{ steps.gateway.outcome }}
+          MODEL_ROUTE_OUTCOME: ${{ steps.model_route.outcome }}
+          MODEL_ROUTE_VERIFIED: ${{ steps.model_route.outputs.model_route_verified }}
           RESPONSES_FALLBACK_VERIFIED: ${{ steps.gateway.outputs.responses_fallback_verified }}
           MESSAGES_GATEWAY_OUTCOME: ${{ steps.messages_gateway.outcome }}
           MESSAGES_ADAPTER_VERIFIED: ${{ steps.messages_gateway.outputs.messages_adapter_verified }}
@@ -1795,6 +1884,9 @@ jobs:
             elif [ "$SCOPE" = 'models' ]; then
               echo "- Models discovery step: ${MODELS_OUTCOME:-not-run}"
               echo "- Hosted + AgentInterposer models discovery: ${MODELS_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'model-route' ]; then
+              echo "- AgentInterposer model-route step: ${MODEL_ROUTE_OUTCOME:-not-run}"
+              echo "- Dedicated hosted model route: ${MODEL_ROUTE_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'responses-fallback' ]; then
               echo "- Requested model: ${MODEL}"
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
