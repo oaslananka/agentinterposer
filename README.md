@@ -165,6 +165,19 @@ This adapter covers text, base64 and URL user image blocks, custom client `tools
 
 The manual `scope=claude-code` Provider Smoke profile verifies Claude Code CLI `2.1.226` -> AgentInterposer -> NVIDIA hosted inference -> Bash `tool_use` -> successful `tool_result` -> final response using `nvidia/nemotron-3-super-120b-a12b`. The `scope=claude-code-loop` profile verifies two sequential successful Bash calls where the second exact command embeds the unpredictable proof returned by the first tool and produces its independently verified SHA-256 digest. The separate `scope=claude-code-error` profile verifies a failing Bash tool result is preserved, returned through the Messages adapter, and followed by a successful recovery tool turn. These certifications remain intentionally limited to this client version, model, and custom Bash-tool flows; parallel tool use, broader Claude Code features, and other models remain uncertified.
 
+### Generate agent client configuration
+
+The binary can print secret-free client configuration without starting the gateway or requiring an upstream provider credential. Supply the model explicitly; an optional fourth argument overrides the default local gateway URL `http://127.0.0.1:11435`.
+
+```bash
+./agentinterposer config codex nvidia/nemotron-3-super-120b-a12b
+./agentinterposer config claude-code nvidia/nemotron-3-super-120b-a12b
+```
+
+The Codex helper prints a `~/.codex/config.toml` fragment using AgentInterposer's Responses endpoint and an `AGENTINTERPOSER_CLIENT_KEY` local placeholder. The Claude Code helper prints shell exports for `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL`. The placeholder client credentials are not upstream provider secrets; the real upstream bearer credential remains owned by the AgentInterposer server process.
+
+For a non-default gateway location, pass the root URL as the fourth argument, for example `https://gateway.example.test/agent`; the Codex renderer derives its `/v1` endpoint while Claude Code uses the gateway root.
+
 ## Configuration
 
 | Environment variable | Default | Purpose |
@@ -189,7 +202,7 @@ Near-term work is intentionally compatibility-first:
 3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
 4. Expand the initial model capability profile and certification registry beyond the current Nemotron 3 Super evidence set.
 5. Integrate the conservative capability selector into explicit fallback-model and multi-provider routing configuration.
-6. Agent configuration helpers for Codex, Claude Code, OpenCode, and compatible VS Code clients.
+6. Expand the initial Codex and Claude Code configuration helpers to OpenCode and compatible VS Code clients.
 
 ## Security
 

@@ -1,0 +1,70 @@
+package agentconfig
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+)
+
+const localClientPlaceholder = "agentinterposer-local-placeholder"
+
+func RenderCodexConfig(model, gatewayURL string) (string, error) {
+	model, baseURL, err := validateInputs(model, gatewayURL)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf(`model = %s
+model_provider = "agentinterposer"
+
+[model_providers.agentinterposer]
+name = "AgentInterposer"
+base_url = %s
+env_key = "AGENTINTERPOSER_CLIENT_KEY"
+# export AGENTINTERPOSER_CLIENT_KEY='agentinterposer-local-placeholder'
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+`, quoteConfig(model), quoteConfig(baseURL+"/v1")), nil
+}
+
+func RenderClaudeCodeEnv(model, gatewayURL string) (string, error) {
+	model, baseURL, err := validateInputs(model, gatewayURL)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("export ANTHROPIC_BASE_URL=%s\nexport ANTHROPIC_AUTH_TOKEN=%s\nexport ANTHROPIC_MODEL=%s\n",
+		quoteShell(baseURL), quoteShell(localClientPlaceholder), quoteShell(model)), nil
+}
+
+func validateInputs(model, gatewayURL string) (string, string, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", "", errors.New("model is required")
+	}
+
+	parsed, err := url.Parse(strings.TrimSpace(gatewayURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", "", errors.New("gateway URL must be an absolute HTTP(S) URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", errors.New("gateway URL must not contain user info, query parameters, or a fragment")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if strings.HasSuffix(parsed.Path, "/v1") {
+		parsed.Path = strings.TrimSuffix(parsed.Path, "/v1")
+	}
+	return model, strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func quoteConfig(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func quoteShell(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
