@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,12 +44,19 @@ type anthropicContentBlock struct {
 	Type         string                 `json:"type"`
 	CacheControl *anthropicCacheControl `json:"cache_control"`
 	Text         string                 `json:"text"`
+	Source       *anthropicImageSource  `json:"source"`
 	ID           string                 `json:"id"`
 	Name         string                 `json:"name"`
 	Input        json.RawMessage        `json:"input"`
 	ToolUseID    string                 `json:"tool_use_id"`
 	Content      json.RawMessage        `json:"content"`
 	IsError      bool                   `json:"is_error"`
+}
+
+type anthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 type anthropicTool struct {
@@ -89,6 +97,16 @@ type chatMessage struct {
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 	Name       string         `json:"name,omitempty"`
+}
+
+type chatContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *chatImageURL `json:"image_url,omitempty"`
+}
+
+type chatImageURL struct {
+	URL string `json:"url"`
 }
 
 type chatTool struct {
@@ -379,6 +397,14 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 		return []chatMessage{out}, toolNames, nil
 	}
 
+	if containsAnthropicImage(blocks) {
+		message, err := translateAnthropicImageMessage(blocks)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []chatMessage{message}, toolNames, nil
+	}
+
 	var result []chatMessage
 	var text strings.Builder
 	for _, block := range blocks {
@@ -411,6 +437,68 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 		result = append(result, chatMessage{Role: "user", Content: text.String()})
 	}
 	return result, toolNames, nil
+}
+
+func containsAnthropicImage(blocks []anthropicContentBlock) bool {
+	for _, block := range blocks {
+		if block.Type == "image" {
+			return true
+		}
+	}
+	return false
+}
+
+func translateAnthropicImageMessage(blocks []anthropicContentBlock) (chatMessage, error) {
+	parts := make([]chatContentPart, 0, len(blocks))
+	for _, block := range blocks {
+		if err := validateAnthropicCacheControl(block.CacheControl); err != nil {
+			return chatMessage{}, fmt.Errorf("user cache_control: %w", err)
+		}
+		switch block.Type {
+		case "text":
+			parts = append(parts, chatContentPart{Type: "text", Text: block.Text})
+		case "image":
+			part, err := translateAnthropicImage(block.Source)
+			if err != nil {
+				return chatMessage{}, err
+			}
+			parts = append(parts, part)
+		case "tool_result":
+			return chatMessage{}, errors.New("tool_result cannot be combined with image content in the Messages adapter yet")
+		default:
+			return chatMessage{}, fmt.Errorf("unsupported user content block %q", block.Type)
+		}
+	}
+	return chatMessage{Role: "user", Content: parts}, nil
+}
+
+func translateAnthropicImage(source *anthropicImageSource) (chatContentPart, error) {
+	if source == nil {
+		return chatContentPart{}, errors.New("image source is required")
+	}
+	if source.Type != "base64" {
+		return chatContentPart{}, fmt.Errorf("unsupported image source type %q", source.Type)
+	}
+	if strings.TrimSpace(source.MediaType) == "" {
+		return chatContentPart{}, errors.New("base64 image media_type is required")
+	}
+	switch source.MediaType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+	default:
+		return chatContentPart{}, fmt.Errorf("unsupported image media_type %q", source.MediaType)
+	}
+	if strings.TrimSpace(source.Data) == "" {
+		return chatContentPart{}, errors.New("base64 image data is required")
+	}
+	if _, err := base64.StdEncoding.DecodeString(source.Data); err != nil {
+		return chatContentPart{}, errors.New("base64 image data is invalid")
+	}
+	return chatContentPart{
+		Type: "image_url",
+		ImageURL: &chatImageURL{
+			URL: "data:" + source.MediaType + ";base64," + source.Data,
+		},
+	}, nil
 }
 
 type agentinterposerToolResultErrorEnvelope struct {
