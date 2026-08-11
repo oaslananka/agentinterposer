@@ -43,6 +43,14 @@ AgentInterposer keeps explicit built-in compatibility assertions for model/clien
 
 Profiles are positive assertions, not guesses: absence of a capability means **uncertified/unknown**, not a universal claim that the provider can never support it. The compatibility layer can conservatively select the first candidate model whose profile asserts every required capability while skipping unknown or incomplete candidates; automatic request rewriting is not enabled yet.
 
+The built-in registry is also available as secret-free JSON from the CLI, which is useful for scripts and compatibility debugging:
+
+```bash
+./agentinterposer capabilities nvidia/nemotron-3-super-120b-a12b
+```
+
+The command returns only positively asserted capabilities and the exact client/version/scenario certification records. Unknown models fail explicitly instead of receiving inferred capabilities.
+
 ## Architecture
 
 ```text

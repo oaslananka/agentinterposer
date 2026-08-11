@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,11 +14,18 @@ import (
 	"time"
 
 	"github.com/oaslananka/agentinterposer/internal/agentconfig"
+	"github.com/oaslananka/agentinterposer/internal/compatibility"
 	"github.com/oaslananka/agentinterposer/internal/config"
 	"github.com/oaslananka/agentinterposer/internal/gateway"
 )
 
 func main() {
+	if handled, exitCode := runCapabilitiesCommand(os.Args[1:], os.Stdout, os.Stderr); handled {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return
+	}
 	if handled, exitCode := runConfigCommand(os.Args[1:], os.Stdout, os.Stderr); handled {
 		if exitCode != 0 {
 			os.Exit(exitCode)
@@ -47,6 +55,38 @@ func main() {
 }
 
 const defaultConfigGatewayURL = "http://127.0.0.1:11435"
+
+func runCapabilitiesCommand(args []string, stdout, stderr io.Writer) (bool, int) {
+	if len(args) == 0 || args[0] != "capabilities" {
+		return false, 0
+	}
+	if len(args) != 2 {
+		_, _ = io.WriteString(stderr, "usage: agentinterposer capabilities <model>\n")
+		return true, 2
+	}
+
+	profile, ok := compatibility.Lookup(args[1])
+	if !ok {
+		fmt.Fprintf(stderr, "no certified capability profile for model %q\n", args[1])
+		return true, 2
+	}
+	payload := struct {
+		Model          string                        `json:"model"`
+		Capabilities   []compatibility.Capability    `json:"capabilities"`
+		Certifications []compatibility.Certification `json:"certifications"`
+	}{
+		Model:          profile.Model,
+		Capabilities:   profile.Capabilities(),
+		Certifications: profile.Certifications,
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(payload); err != nil {
+		fmt.Fprintf(stderr, "encode capability profile: %v\n", err)
+		return true, 1
+	}
+	return true, 0
+}
 
 func runConfigCommand(args []string, stdout, stderr io.Writer) (bool, int) {
 	if len(args) == 0 || args[0] != "config" {
