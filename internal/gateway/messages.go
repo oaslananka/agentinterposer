@@ -409,22 +409,19 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 
 	var result []chatMessage
 	var text strings.Builder
-	flushText := func() {
-		if text.Len() == 0 {
-			return
-		}
-		result = append(result, chatMessage{Role: "user", Content: text.String()})
-		text.Reset()
-	}
+	seenText := false
 	for _, block := range blocks {
 		if err := validateAnthropicCacheControl(block.CacheControl); err != nil {
 			return nil, nil, fmt.Errorf("user cache_control: %w", err)
 		}
 		switch block.Type {
 		case "text":
+			seenText = true
 			text.WriteString(block.Text)
 		case "tool_result":
-			flushText()
+			if seenText {
+				return nil, nil, errors.New("tool_result blocks must appear before text blocks in user content")
+			}
 			if block.ToolUseID == "" {
 				return nil, nil, errors.New("tool_result requires tool_use_id")
 			}
@@ -443,7 +440,9 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 			return nil, nil, fmt.Errorf("unsupported user content block %q", block.Type)
 		}
 	}
-	flushText()
+	if text.Len() > 0 {
+		result = append(result, chatMessage{Role: "user", Content: text.String()})
+	}
 	return result, toolNames, nil
 }
 
