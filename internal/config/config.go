@@ -163,7 +163,7 @@ func parseModelRoutes(raw string, getenv func(string) string) ([]ModelRoute, err
 	if err := decoder.Decode(&configured); err != nil {
 		return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES must be a JSON array of model routes: %w", err)
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if decoder.Decode(&struct{}{}) != io.EOF {
 		return nil, errors.New("AGENTINTERPOSER_MODEL_ROUTES must contain exactly one JSON array")
 	}
 
