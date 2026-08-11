@@ -10,6 +10,43 @@ import (
 	"github.com/oaslananka/agentinterposer/internal/config"
 )
 
+func TestNewHandlerWiresModelRoutes(t *testing.T) {
+	t.Parallel()
+
+	var gotAuthorization string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-route","choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := newHandler(config.Config{
+		UpstreamURL:         "https://default.example.test",
+		UpstreamBearerToken: "default-token",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		ModelRoutes: []config.ModelRoute{{
+			Model:               "provider/routed-model",
+			UpstreamURL:         upstream.URL,
+			UpstreamBearerToken: "route-token",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newHandler() error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"provider/routed-model","messages":[{"role":"user","content":"hi"}]}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotAuthorization != "Bearer route-token" {
+		t.Fatalf("Authorization = %q, want routed token", gotAuthorization)
+	}
+}
+
 func TestNewHandlerWiresApplicationConfig(t *testing.T) {
 	t.Parallel()
 

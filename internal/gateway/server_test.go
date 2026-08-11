@@ -91,6 +91,251 @@ func TestHandlerForwardsChatCompletionWithServerOwnedAuthorization(t *testing.T)
 	}
 }
 
+func TestHandlerKeepsModelDiscoveryOnDefaultUpstream(t *testing.T) {
+	t.Parallel()
+
+	var defaultPath, defaultAuthorization string
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultPath = r.URL.Path
+		defaultAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer defaultUpstream.Close()
+
+	var routedHits atomic.Int32
+	routedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		routedHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer routedUpstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         defaultUpstream.URL,
+		UpstreamBearerToken: "default-token",
+		MaxConcurrent:       1,
+		ModelRoutes: []ModelRoute{{
+			Model:               "provider/routed-model",
+			UpstreamURL:         routedUpstream.URL,
+			UpstreamBearerToken: "route-token",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if routedHits.Load() != 0 {
+		t.Fatalf("routed upstream hits = %d, want 0", routedHits.Load())
+	}
+	if defaultPath != "/v1/models" {
+		t.Fatalf("default path = %q, want /v1/models", defaultPath)
+	}
+	if defaultAuthorization != "Bearer default-token" {
+		t.Fatalf("default Authorization = %q", defaultAuthorization)
+	}
+}
+
+func TestHandlerRoutesExplicitModelToDedicatedUpstream(t *testing.T) {
+	t.Parallel()
+
+	var defaultHits atomic.Int32
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defaultHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer defaultUpstream.Close()
+
+	var gotBody, gotAuthorization, gotPath string
+	routedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read routed body: %v", err)
+		}
+		gotBody = string(body)
+		gotAuthorization = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-routed","choices":[]}`))
+	}))
+	defer routedUpstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         defaultUpstream.URL,
+		UpstreamBearerToken: "default-token",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		ModelRoutes: []ModelRoute{{
+			Model:               "provider/routed-model",
+			UpstreamURL:         routedUpstream.URL + "/v1/",
+			UpstreamBearerToken: "route-token",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"provider/routed-model","messages":[{"role":"user","content":"hi"}],"top_k":17}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if defaultHits.Load() != 0 {
+		t.Fatalf("default upstream hits = %d, want 0", defaultHits.Load())
+	}
+	if gotBody != body {
+		t.Fatalf("routed body = %q, want exact body %q", gotBody, body)
+	}
+	if gotAuthorization != "Bearer route-token" {
+		t.Fatalf("routed Authorization = %q", gotAuthorization)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("routed path = %q, want /v1/chat/completions", gotPath)
+	}
+}
+
+func TestHandlerUsesDefaultUpstreamForUnroutedModel(t *testing.T) {
+	t.Parallel()
+
+	var gotBody, gotAuthorization string
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read default body: %v", err)
+		}
+		gotBody = string(body)
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-default","choices":[]}`))
+	}))
+	defer defaultUpstream.Close()
+
+	routedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer routedUpstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         defaultUpstream.URL,
+		UpstreamBearerToken: "default-token",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		ModelRoutes: []ModelRoute{{
+			Model:               "provider/routed-model",
+			UpstreamURL:         routedUpstream.URL,
+			UpstreamBearerToken: "route-token",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"provider/default-model","messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if gotBody != body {
+		t.Fatalf("default body = %q, want exact body %q", gotBody, body)
+	}
+	if gotAuthorization != "Bearer default-token" {
+		t.Fatalf("default Authorization = %q", gotAuthorization)
+	}
+}
+
+func TestHandlerFallbackSelectedModelUsesDedicatedUpstream(t *testing.T) {
+	t.Parallel()
+
+	var defaultHits atomic.Int32
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defaultHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer defaultUpstream.Close()
+
+	var gotModel, gotAuthorization string
+	routedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode routed body: %v", err)
+		}
+		gotModel, _ = body["model"].(string)
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-fallback-route","model":"meta/llama-3.2-11b-vision-instruct","choices":[]}`))
+	}))
+	defer routedUpstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         defaultUpstream.URL,
+		UpstreamBearerToken: "default-token",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		FallbackModels:      []string{"meta/llama-3.2-11b-vision-instruct"},
+		ModelRoutes: []ModelRoute{{
+			Model:               "meta/llama-3.2-11b-vision-instruct",
+			UpstreamURL:         routedUpstream.URL,
+			UpstreamBearerToken: "route-token",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if defaultHits.Load() != 0 {
+		t.Fatalf("default upstream hits = %d, want 0", defaultHits.Load())
+	}
+	if gotModel != "meta/llama-3.2-11b-vision-instruct" {
+		t.Fatalf("routed model = %q, want fallback model", gotModel)
+	}
+	if gotAuthorization != "Bearer route-token" {
+		t.Fatalf("routed Authorization = %q", gotAuthorization)
+	}
+}
+
+func TestNewHandlerRejectsInvalidModelRoutes(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string][]ModelRoute{
+		"empty model":   {{Model: "", UpstreamURL: "https://route.example.test", UpstreamBearerToken: "route-token"}},
+		"invalid URL":   {{Model: "provider/model", UpstreamURL: "file:///tmp/provider", UpstreamBearerToken: "route-token"}},
+		"missing token": {{Model: "provider/model", UpstreamURL: "https://route.example.test", UpstreamBearerToken: ""}},
+		"duplicate model": {
+			{Model: "provider/model", UpstreamURL: "https://one.example.test", UpstreamBearerToken: "one-token"},
+			{Model: "provider/model", UpstreamURL: "https://two.example.test", UpstreamBearerToken: "two-token"},
+		},
+	}
+	for name, routes := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewHandler(Config{
+				UpstreamURL:         "https://default.example.test",
+				UpstreamBearerToken: "default-token",
+				ModelRoutes:         routes,
+			})
+			if err == nil {
+				t.Fatal("NewHandler() accepted an invalid model route")
+			}
+		})
+	}
+}
+
 func TestHandlerRoutesChatVisionToCertifiedFallbackPreservingUnknownFields(t *testing.T) {
 	t.Parallel()
 
