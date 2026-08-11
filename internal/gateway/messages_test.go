@@ -100,6 +100,36 @@ func TestHandlerTranslatesAnthropicTextMessageToChatCompletions(t *testing.T) {
 	}
 }
 
+func TestTranslateAnthropicUserContentPreservesTextToolResultOrder(t *testing.T) {
+	t.Parallel()
+
+	message := anthropicInputMessage{
+		Role: "user",
+		Content: json.RawMessage(`[
+			{"type":"text","text":"before"},
+			{"type":"tool_result","tool_use_id":"call_probe","content":"tool output"},
+			{"type":"text","text":"after"}
+		]`),
+	}
+
+	translated, _, err := translateAnthropicMessage(message)
+	if err != nil {
+		t.Fatalf("translateAnthropicMessage() error = %v", err)
+	}
+	if len(translated) != 3 {
+		t.Fatalf("translated message count = %d, want 3: %#v", len(translated), translated)
+	}
+	if translated[0].Role != "user" || translated[0].Content != "before" {
+		t.Fatalf("translated[0] = %#v, want leading user text", translated[0])
+	}
+	if translated[1].Role != "tool" || translated[1].ToolCallID != "call_probe" || translated[1].Content != "tool output" {
+		t.Fatalf("translated[1] = %#v, want tool result", translated[1])
+	}
+	if translated[2].Role != "user" || translated[2].Content != "after" {
+		t.Fatalf("translated[2] = %#v, want trailing user text", translated[2])
+	}
+}
+
 func TestHandlerTranslatesAnthropicToolUseAndToolResultRoundTrip(t *testing.T) {
 	t.Parallel()
 
