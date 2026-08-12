@@ -26,6 +26,7 @@ on:
           - responses-fallback
           - responses-structured-fallback
           - responses-routed-fallback
+          - responses-structured-routed-fallback
           - messages
           - messages-vision
           - messages-vision-fallback
@@ -418,7 +419,7 @@ jobs:
           fi
 
       - name: Probe AgentInterposer Responses passthrough
-        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' || inputs.scope == 'responses-routed-fallback' }}
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' || inputs.scope == 'responses-routed-fallback' || inputs.scope == 'responses-structured-routed-fallback' }}
         id: gateway
         shell: bash
         env:
@@ -443,7 +444,7 @@ jobs:
           trap cleanup EXIT
 
           fallback_models=''
-          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-routed-fallback' ]; then
+          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-routed-fallback' ] || [ "$SCOPE" = 'responses-structured-routed-fallback' ]; then
             if [ -z "$FALLBACK_MODEL" ]; then
               echo "$SCOPE requires fallback_model." >&2
               exit 2
@@ -454,7 +455,7 @@ jobs:
           model_routes=''
           upstream_url=''
           upstream_token=''
-          if [ "$SCOPE" = 'responses-routed-fallback' ]; then
+          if [ "$SCOPE" = 'responses-routed-fallback' ] || [ "$SCOPE" = 'responses-structured-routed-fallback' ]; then
             model_routes="$(python3 - <<'PY'
           import json
           import os
@@ -504,7 +505,7 @@ jobs:
               "max_output_tokens": 16,
               "stream": False,
           }
-          if os.environ["SCOPE"] == "responses-structured-fallback":
+          if os.environ["SCOPE"] in {"responses-structured-fallback", "responses-structured-routed-fallback"}:
               payload["input"] = [
                   {
                       "role": "user",
@@ -538,13 +539,13 @@ jobs:
           data = json.load(open(body_path, encoding="utf-8"))
           if data.get("object") != "response" and not isinstance(data.get("output"), list):
               raise SystemExit("AgentInterposer returned an unexpected Responses schema")
-          if scope in {"responses-fallback", "responses-structured-fallback", "responses-routed-fallback"}:
+          if scope in {"responses-fallback", "responses-structured-fallback", "responses-routed-fallback", "responses-structured-routed-fallback"}:
               if data.get("model") != fallback_model:
                   raise SystemExit("Responses fallback did not report the configured routed model")
               print("agentinterposer_responses_fallback_model=ok")
           print("agentinterposer_responses_schema=ok")
           PY
-          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-routed-fallback' ]; then
+          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-routed-fallback' ] || [ "$SCOPE" = 'responses-structured-routed-fallback' ]; then
             echo 'responses_fallback_verified=true' >> "$GITHUB_OUTPUT"
           fi
 
@@ -1954,6 +1955,11 @@ jobs:
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
               echo "- AgentInterposer Responses fallback + model-route step: ${GATEWAY_OUTCOME:-not-run}"
               echo "- Responses capability fallback + dedicated route: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'responses-structured-routed-fallback' ]; then
+              echo "- Requested model: ${MODEL}"
+              echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
+              echo "- AgentInterposer structured Responses fallback + model-route step: ${GATEWAY_OUTCOME:-not-run}"
+              echo "- Structured Responses capability fallback + dedicated route: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'messages' ]; then
