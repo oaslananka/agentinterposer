@@ -21,6 +21,7 @@ on:
         options:
           - baseline
           - full
+          - gpt-oss
           - models
           - model-route
           - responses-fallback
@@ -186,16 +187,33 @@ jobs:
           echo 'models_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe Chat Completions
-        if: ${{ inputs.scope == 'full' || inputs.scope == 'baseline' }}
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'baseline' || inputs.scope == 'gpt-oss' }}
         id: chat
         shell: bash
         env:
           NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
+          SCOPE: ${{ inputs.scope }}
         run: |
           set -euo pipefail
           body="$(mktemp)"
           trap 'rm -f "$body"' EXIT
+
+          chat_payload="$(python3 - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "model": os.environ["MODEL"],
+              "messages": [{"role": "user", "content": "Reply only with OK"}],
+              "max_tokens": 16,
+              "stream": False,
+          }
+          if os.environ["SCOPE"] == "gpt-oss":
+              payload["reasoning_effort"] = "low"
+          print(json.dumps(payload, separators=(",", ":")))
+          PY
+          )"
 
           status="$(curl --silent --show-error \
             --max-time 120 \
@@ -205,7 +223,7 @@ jobs:
             'https://integrate.api.nvidia.com/v1/chat/completions' \
             --header "Authorization: Bearer ${NVIDIA_API_KEY}" \
             --header 'Content-Type: application/json' \
-            --data "$(python3 -c 'import json,os; print(json.dumps({"model": os.environ["MODEL"], "messages": [{"role": "user", "content": "Reply only with OK"}], "max_tokens": 16, "stream": False}))')")"
+            --data "$chat_payload")"
 
           echo "chat_completions_http=${status}"
           if [[ ! "$status" =~ ^2 ]]; then
@@ -225,11 +243,16 @@ jobs:
             exit 1
           fi
 
-          python3 - "$body" <<'PY'
+          python3 - "$body" "$SCOPE" "$MODEL" <<'PY'
           import json, sys
-          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          body_path, scope, model = sys.argv[1:]
+          data = json.load(open(body_path, encoding="utf-8"))
           if not isinstance(data.get("choices"), list):
               raise SystemExit("Chat Completions response is missing choices[]")
+          if scope == "gpt-oss":
+              if data.get("model") != model:
+                  raise SystemExit("GPT-OSS Chat response did not report the requested model")
+              print("gpt_oss_chat_model=ok")
           print("chat_completions_schema=ok")
           PY
 
@@ -320,12 +343,13 @@ jobs:
           echo 'model_route_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe Responses API
-        if: ${{ inputs.scope == 'full' }}
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'gpt-oss' }}
         id: responses
         shell: bash
         env:
           NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
           MODEL: ${{ inputs.model }}
+          SCOPE: ${{ inputs.scope }}
         run: |
           set -euo pipefail
           body="$(mktemp)"
@@ -343,11 +367,16 @@ jobs:
 
           echo "responses_http=${status}"
           if [[ "$status" =~ ^2 ]]; then
-            python3 - "$body" <<'PY'
+            python3 - "$body" "$SCOPE" "$MODEL" <<'PY'
           import json, sys
-          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          body_path, scope, model = sys.argv[1:]
+          data = json.load(open(body_path, encoding="utf-8"))
           if data.get("object") != "response" and not isinstance(data.get("output"), list):
               raise SystemExit("Responses API returned an unexpected schema")
+          if scope == "gpt-oss":
+              if data.get("model") != model:
+                  raise SystemExit("GPT-OSS Responses API did not report the requested model")
+              print("gpt_oss_responses_model=ok")
           print("responses_schema=ok")
           PY
             echo "responses_supported=true" >> "$GITHUB_OUTPUT"
@@ -419,7 +448,7 @@ jobs:
           fi
 
       - name: Probe AgentInterposer Responses passthrough
-        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' || inputs.scope == 'responses-routed-fallback' || inputs.scope == 'responses-structured-routed-fallback' }}
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'gpt-oss' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' || inputs.scope == 'responses-routed-fallback' || inputs.scope == 'responses-structured-routed-fallback' }}
         id: gateway
         shell: bash
         env:
@@ -543,6 +572,10 @@ jobs:
               if data.get("model") != fallback_model:
                   raise SystemExit("Responses fallback did not report the configured routed model")
               print("agentinterposer_responses_fallback_model=ok")
+          elif scope == "gpt-oss":
+              if data.get("model") != model:
+                  raise SystemExit("AgentInterposer GPT-OSS Responses did not report the requested model")
+              print("agentinterposer_gpt_oss_responses_model=ok")
           print("agentinterposer_responses_schema=ok")
           PY
           if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-routed-fallback' ] || [ "$SCOPE" = 'responses-structured-routed-fallback' ]; then
@@ -1960,6 +1993,10 @@ jobs:
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
               echo "- AgentInterposer structured Responses fallback + model-route step: ${GATEWAY_OUTCOME:-not-run}"
               echo "- Structured Responses capability fallback + dedicated route: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'gpt-oss' ]; then
+              echo "- GPT-OSS Chat Completions (reasoning_effort=low): ${CHAT_OUTCOME:-not-run}"
+              echo "- GPT-OSS native Responses API: ${RESPONSES_SUPPORTED:-unknown}"
+              echo "- AgentInterposer GPT-OSS Responses passthrough: ${GATEWAY_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'messages' ]; then
