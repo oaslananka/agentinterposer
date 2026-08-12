@@ -60,6 +60,14 @@ var builtinProfiles = map[string]Profile{
 		},
 		Certifications: []Certification{},
 	},
+	"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
+		Model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+		capabilities: map[Capability]bool{
+			CapabilityChatCompletions: true,
+			CapabilityVisionInput:     true,
+		},
+		Certifications: []Certification{},
+	},
 	"nvidia/nemotron-3-super-120b-a12b": {
 		Model: "nvidia/nemotron-3-super-120b-a12b",
 		capabilities: map[Capability]bool{
