@@ -25,6 +25,7 @@ on:
           - model-route
           - responses-fallback
           - responses-structured-fallback
+          - responses-routed-fallback
           - messages
           - messages-vision
           - messages-vision-fallback
@@ -417,7 +418,7 @@ jobs:
           fi
 
       - name: Probe AgentInterposer Responses passthrough
-        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' }}
+        if: ${{ inputs.scope == 'full' || inputs.scope == 'responses-fallback' || inputs.scope == 'responses-structured-fallback' || inputs.scope == 'responses-routed-fallback' }}
         id: gateway
         shell: bash
         env:
@@ -442,7 +443,7 @@ jobs:
           trap cleanup EXIT
 
           fallback_models=''
-          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ]; then
+          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-routed-fallback' ]; then
             if [ -z "$FALLBACK_MODEL" ]; then
               echo "$SCOPE requires fallback_model." >&2
               exit 2
@@ -450,9 +451,31 @@ jobs:
             fallback_models="$FALLBACK_MODEL"
           fi
 
+          model_routes=''
+          upstream_url=''
+          upstream_token=''
+          if [ "$SCOPE" = 'responses-routed-fallback' ]; then
+            model_routes="$(python3 - <<'PY'
+          import json
+          import os
+
+          print(json.dumps([{
+              "model": os.environ["FALLBACK_MODEL"],
+              "upstream_url": "https://integrate.api.nvidia.com/v1",
+              "bearer_token_env": "NVIDIA_API_KEY",
+          }], separators=(",", ":")))
+          PY
+            )"
+            upstream_url='http://127.0.0.1:9'
+            upstream_token='unused-default-placeholder'
+          fi
+
           go build -trimpath -o "$binary" ./cmd/agentinterposer
           AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            AGENTINTERPOSER_UPSTREAM_URL="$upstream_url" \
+            AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN="$upstream_token" \
             AGENTINTERPOSER_FALLBACK_MODELS="$fallback_models" \
+            AGENTINTERPOSER_MODEL_ROUTES="$model_routes" \
             NVIDIA_API_KEY="$NVIDIA_API_KEY" \
             "$binary" >"$log" 2>&1 &
           pid=$!
@@ -515,13 +538,13 @@ jobs:
           data = json.load(open(body_path, encoding="utf-8"))
           if data.get("object") != "response" and not isinstance(data.get("output"), list):
               raise SystemExit("AgentInterposer returned an unexpected Responses schema")
-          if scope in {"responses-fallback", "responses-structured-fallback"}:
+          if scope in {"responses-fallback", "responses-structured-fallback", "responses-routed-fallback"}:
               if data.get("model") != fallback_model:
                   raise SystemExit("Responses fallback did not report the configured routed model")
               print("agentinterposer_responses_fallback_model=ok")
           print("agentinterposer_responses_schema=ok")
           PY
-          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ]; then
+          if [ "$SCOPE" = 'responses-fallback' ] || [ "$SCOPE" = 'responses-structured-fallback' ] || [ "$SCOPE" = 'responses-routed-fallback' ]; then
             echo 'responses_fallback_verified=true' >> "$GITHUB_OUTPUT"
           fi
 
@@ -1926,6 +1949,11 @@ jobs:
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
               echo "- AgentInterposer structured Responses fallback step: ${GATEWAY_OUTCOME:-not-run}"
               echo "- Routed input_text Responses request: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'responses-routed-fallback' ]; then
+              echo "- Requested model: ${MODEL}"
+              echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
+              echo "- AgentInterposer Responses fallback + model-route step: ${GATEWAY_OUTCOME:-not-run}"
+              echo "- Responses capability fallback + dedicated route: ${RESPONSES_FALLBACK_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'baseline' ]; then
               echo "- Chat Completions baseline: ${CHAT_OUTCOME:-not-run}"
             elif [ "$SCOPE" = 'messages' ]; then
