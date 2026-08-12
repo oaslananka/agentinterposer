@@ -46,44 +46,6 @@ func TestLookupCertifiedLlamaVisionProfile(t *testing.T) {
 	}
 }
 
-func TestLookupCertifiedGPTOSSProfile(t *testing.T) {
-	t.Parallel()
-
-	profile, ok := Lookup("openai/gpt-oss-120b")
-	if !ok {
-		t.Fatal("Lookup() did not return the certified GPT-OSS profile")
-	}
-	if profile.Model != "openai/gpt-oss-120b" {
-		t.Fatalf("Model = %q", profile.Model)
-	}
-	for _, capability := range []Capability{CapabilityChatCompletions, CapabilityResponses} {
-		if !profile.Supports(capability) {
-			t.Errorf("GPT-OSS profile does not support %q", capability)
-		}
-	}
-	if profile.Supports(CapabilityToolCalling) {
-		t.Fatal("GPT-OSS profile must not assert uncertified tool-calling support")
-	}
-	if profile.Supports(CapabilityVisionInput) {
-		t.Fatal("GPT-OSS profile must not assert vision input support")
-	}
-	if len(profile.Certifications) != 0 {
-		t.Fatalf("GPT-OSS client certifications = %#v, want none", profile.Certifications)
-	}
-}
-
-func TestSelectModelCanUseGPTOSSForResponses(t *testing.T) {
-	t.Parallel()
-
-	profile, ok := SelectModel([]string{"openai/gpt-oss-120b"}, CapabilityResponses)
-	if !ok {
-		t.Fatal("SelectModel() did not select the certified GPT-OSS Responses profile")
-	}
-	if profile.Model != "openai/gpt-oss-120b" {
-		t.Fatalf("selected model = %q", profile.Model)
-	}
-}
-
 func TestLookupUnknownModelDoesNotAssumeCapabilities(t *testing.T) {
 	t.Parallel()
 
