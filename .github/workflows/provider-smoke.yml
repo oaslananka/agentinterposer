@@ -9,7 +9,7 @@ on:
         default: nvidia/nemotron-3-super-120b-a12b
         type: string
       fallback_model:
-        description: Optional same-upstream fallback model for routing probes
+        description: Optional fallback model for routing probes
         required: false
         default: ""
         type: string
@@ -29,6 +29,7 @@ on:
           - messages-vision
           - messages-vision-fallback
           - chat-vision-fallback
+          - chat-vision-routed-fallback
           - messages-stream
           - claude-code
           - claude-code-error
@@ -713,7 +714,7 @@ jobs:
           echo 'messages_adapter_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe AgentInterposer vision routing
-        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'messages-vision-fallback' || inputs.scope == 'chat-vision-fallback' }}
+        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'messages-vision-fallback' || inputs.scope == 'chat-vision-fallback' || inputs.scope == 'chat-vision-routed-fallback' }}
         id: messages_vision_gateway
         shell: bash
         env:
@@ -740,7 +741,7 @@ jobs:
           trap cleanup EXIT
 
           fallback_models=''
-          if [ "$SCOPE" = 'messages-vision-fallback' ] || [ "$SCOPE" = 'chat-vision-fallback' ]; then
+          if [ "$SCOPE" = 'messages-vision-fallback' ] || [ "$SCOPE" = 'chat-vision-fallback' ] || [ "$SCOPE" = 'chat-vision-routed-fallback' ]; then
             if [ -z "$FALLBACK_MODEL" ]; then
               echo "$SCOPE requires fallback_model." >&2
               exit 2
@@ -748,9 +749,31 @@ jobs:
             fallback_models="$FALLBACK_MODEL"
           fi
 
+          model_routes=''
+          upstream_url=''
+          upstream_token=''
+          if [ "$SCOPE" = 'chat-vision-routed-fallback' ]; then
+            model_routes="$(python3 - <<'PY'
+          import json
+          import os
+
+          print(json.dumps([{
+              "model": os.environ["FALLBACK_MODEL"],
+              "upstream_url": "https://integrate.api.nvidia.com/v1",
+              "bearer_token_env": "NVIDIA_API_KEY",
+          }], separators=(",", ":")))
+          PY
+            )"
+            upstream_url='http://127.0.0.1:9'
+            upstream_token='unused-default-placeholder'
+          fi
+
           go build -trimpath -o "$binary" ./cmd/agentinterposer
           AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            AGENTINTERPOSER_UPSTREAM_URL="$upstream_url" \
+            AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN="$upstream_token" \
             AGENTINTERPOSER_FALLBACK_MODELS="$fallback_models" \
+            AGENTINTERPOSER_MODEL_ROUTES="$model_routes" \
             NVIDIA_API_KEY="$NVIDIA_API_KEY" \
             "$binary" >"$log" 2>&1 &
           pid=$!
@@ -798,7 +821,7 @@ jobs:
           )
           image_data = base64.b64encode(png).decode("ascii")
           prompt = "Which half of the image is red? Reply with exactly LEFT or RIGHT and no other text."
-          if scope == "chat-vision-fallback":
+          if scope in {"chat-vision-fallback", "chat-vision-routed-fallback"}:
               payload = {
                   "model": model,
                   "max_tokens": 8,
@@ -840,7 +863,7 @@ jobs:
           PY
 
           endpoint='http://127.0.0.1:11435/v1/messages'
-          if [ "$SCOPE" = 'chat-vision-fallback' ]; then
+          if [ "$SCOPE" = 'chat-vision-fallback' ] || [ "$SCOPE" = 'chat-vision-routed-fallback' ]; then
             endpoint='http://127.0.0.1:11435/v1/chat/completions'
           fi
 
@@ -866,11 +889,11 @@ jobs:
 
           response_path, expected_path, scope, model, fallback_model = sys.argv[1:]
           data = json.load(open(response_path, encoding="utf-8"))
-          expected_model = fallback_model if scope in {"messages-vision-fallback", "chat-vision-fallback"} else model
+          expected_model = fallback_model if scope in {"messages-vision-fallback", "chat-vision-fallback", "chat-vision-routed-fallback"} else model
           if data.get("model") != expected_model:
               raise SystemExit("Vision response did not report the expected routed model")
 
-          if scope == "chat-vision-fallback":
+          if scope in {"chat-vision-fallback", "chat-vision-routed-fallback"}:
               choices = data.get("choices")
               if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
                   raise SystemExit("Chat vision response has an unexpected choices envelope")
@@ -1915,6 +1938,11 @@ jobs:
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
               echo "- AgentInterposer Chat Completions vision fallback step: ${MESSAGES_VISION_OUTCOME:-not-run}"
               echo "- Routed randomized image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'chat-vision-routed-fallback' ]; then
+              echo "- Requested model: ${MODEL}"
+              echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
+              echo "- AgentInterposer fallback + model-route step: ${MESSAGES_VISION_OUTCOME:-not-run}"
+              echo "- Capability fallback + dedicated route + randomized vision: ${MESSAGES_VISION_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'messages-stream' ]; then
               echo "- AgentInterposer Messages streaming step: ${MESSAGES_STREAM_OUTCOME:-not-run}"
               echo "- Messages text + tool SSE: ${MESSAGES_STREAM_VERIFIED:-not-verified}"
