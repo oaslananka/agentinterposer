@@ -46,6 +46,44 @@ func TestLookupCertifiedLlamaVisionProfile(t *testing.T) {
 	}
 }
 
+func TestLookupCertifiedNemotronNanoProfile(t *testing.T) {
+	t.Parallel()
+
+	profile, ok := Lookup("nvidia/nemotron-3-nano-30b-a3b")
+	if !ok {
+		t.Fatal("Lookup() did not return the certified Nemotron 3 Nano profile")
+	}
+	if profile.Model != "nvidia/nemotron-3-nano-30b-a3b" {
+		t.Fatalf("Model = %q", profile.Model)
+	}
+	for _, capability := range []Capability{CapabilityChatCompletions, CapabilityResponses} {
+		if !profile.Supports(capability) {
+			t.Errorf("Nemotron 3 Nano profile does not support %q", capability)
+		}
+	}
+	if profile.Supports(CapabilityToolCalling) {
+		t.Fatal("Nemotron 3 Nano profile must not assert unreliable tool-calling support")
+	}
+	if profile.Supports(CapabilityVisionInput) {
+		t.Fatal("Nemotron 3 Nano profile must not assert vision input support")
+	}
+	if len(profile.Certifications) != 0 {
+		t.Fatalf("Nemotron 3 Nano client certifications = %#v, want none", profile.Certifications)
+	}
+}
+
+func TestSelectModelCanUseNemotronNanoForResponses(t *testing.T) {
+	t.Parallel()
+
+	profile, ok := SelectModel([]string{"nvidia/nemotron-3-nano-30b-a3b"}, CapabilityResponses)
+	if !ok {
+		t.Fatal("SelectModel() did not select the certified Nemotron 3 Nano Responses profile")
+	}
+	if profile.Model != "nvidia/nemotron-3-nano-30b-a3b" {
+		t.Fatalf("selected model = %q", profile.Model)
+	}
+}
+
 func TestLookupUnknownModelDoesNotAssumeCapabilities(t *testing.T) {
 	t.Parallel()
 
