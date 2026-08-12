@@ -52,6 +52,14 @@ var builtinProfiles = map[string]Profile{
 		},
 		Certifications: []Certification{},
 	},
+	"openai/gpt-oss-120b": {
+		Model: "openai/gpt-oss-120b",
+		capabilities: map[Capability]bool{
+			CapabilityChatCompletions: true,
+			CapabilityResponses:       true,
+		},
+		Certifications: []Certification{},
+	},
 	"nvidia/nemotron-3-super-120b-a12b": {
 		Model: "nvidia/nemotron-3-super-120b-a12b",
 		capabilities: map[Capability]bool{
