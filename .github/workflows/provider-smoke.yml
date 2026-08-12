@@ -28,6 +28,7 @@ on:
           - messages
           - messages-vision
           - messages-vision-fallback
+          - messages-vision-routed-fallback
           - chat-vision-fallback
           - chat-vision-routed-fallback
           - messages-stream
@@ -714,7 +715,7 @@ jobs:
           echo 'messages_adapter_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Probe AgentInterposer vision routing
-        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'messages-vision-fallback' || inputs.scope == 'chat-vision-fallback' || inputs.scope == 'chat-vision-routed-fallback' }}
+        if: ${{ inputs.scope == 'messages-vision' || inputs.scope == 'messages-vision-fallback' || inputs.scope == 'messages-vision-routed-fallback' || inputs.scope == 'chat-vision-fallback' || inputs.scope == 'chat-vision-routed-fallback' }}
         id: messages_vision_gateway
         shell: bash
         env:
@@ -741,7 +742,7 @@ jobs:
           trap cleanup EXIT
 
           fallback_models=''
-          if [ "$SCOPE" = 'messages-vision-fallback' ] || [ "$SCOPE" = 'chat-vision-fallback' ] || [ "$SCOPE" = 'chat-vision-routed-fallback' ]; then
+          if [ "$SCOPE" = 'messages-vision-fallback' ] || [ "$SCOPE" = 'messages-vision-routed-fallback' ] || [ "$SCOPE" = 'chat-vision-fallback' ] || [ "$SCOPE" = 'chat-vision-routed-fallback' ]; then
             if [ -z "$FALLBACK_MODEL" ]; then
               echo "$SCOPE requires fallback_model." >&2
               exit 2
@@ -752,7 +753,7 @@ jobs:
           model_routes=''
           upstream_url=''
           upstream_token=''
-          if [ "$SCOPE" = 'chat-vision-routed-fallback' ]; then
+          if [ "$SCOPE" = 'messages-vision-routed-fallback' ] || [ "$SCOPE" = 'chat-vision-routed-fallback' ]; then
             model_routes="$(python3 - <<'PY'
           import json
           import os
@@ -889,7 +890,7 @@ jobs:
 
           response_path, expected_path, scope, model, fallback_model = sys.argv[1:]
           data = json.load(open(response_path, encoding="utf-8"))
-          expected_model = fallback_model if scope in {"messages-vision-fallback", "chat-vision-fallback", "chat-vision-routed-fallback"} else model
+          expected_model = fallback_model if scope in {"messages-vision-fallback", "messages-vision-routed-fallback", "chat-vision-fallback", "chat-vision-routed-fallback"} else model
           if data.get("model") != expected_model:
               raise SystemExit("Vision response did not report the expected routed model")
 
@@ -918,7 +919,7 @@ jobs:
               if data.get("stop_reason") not in {"end_turn", "max_tokens"}:
                   raise SystemExit("Messages vision response has an unexpected stop_reason")
 
-          if scope != "chat-vision-routed-fallback":
+          if scope not in {"messages-vision-routed-fallback", "chat-vision-routed-fallback"}:
               expected = open(expected_path, encoding="utf-8").read().strip().upper()
               directions = re.findall(r"\b(?:LEFT|RIGHT)\b", text)
               if not directions or len(set(directions)) != 1:
@@ -1938,6 +1939,11 @@ jobs:
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
               echo "- AgentInterposer Messages vision fallback step: ${MESSAGES_VISION_OUTCOME:-not-run}"
               echo "- Routed randomized base64 image read: ${MESSAGES_VISION_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'messages-vision-routed-fallback' ]; then
+              echo "- Requested model: ${MODEL}"
+              echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
+              echo "- AgentInterposer Messages fallback + model-route step: ${MESSAGES_VISION_OUTCOME:-not-run}"
+              echo "- Messages capability fallback + dedicated route + image request: ${MESSAGES_VISION_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'chat-vision-fallback' ]; then
               echo "- Requested model: ${MODEL}"
               echo "- Configured fallback model: ${FALLBACK_MODEL:-not-configured}"
