@@ -215,6 +215,8 @@ export AGENTINTERPOSER_MODEL_ROUTES='[{"model":"provider/routed-model","upstream
 
 Supply `ALT_PROVIDER_API_KEY` to the AgentInterposer process from Doppler (or the equivalent secret-injection mechanism for your deployment). Unrouted models continue to use the default upstream and credential, and `GET /v1/models` remains a default-upstream discovery request. Configuring a route is an operator routing choice; it does not create a compatibility certification for that model or provider.
 
+The manual `Provider Smoke` scope `model-route` certifies the dedicated-route mechanism against NVIDIA hosted inference by making the default upstream deliberately unreachable and requiring an explicitly routed model to return a valid Chat Completions response. The separate `chat-vision-routed-fallback` scope certifies composition of capability fallback and model routing: an image-bearing Nemotron request must select the Llama vision fallback, that fallback must follow its dedicated route, and the hosted response must report the fallback model with a non-empty Chat response. These probes certify the routing mechanisms against the already-used NVIDIA provider; they do **not** claim compatibility with a second external provider.
+
 ## Roadmap
 
 Near-term work is intentionally compatibility-first:
