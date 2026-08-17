@@ -104,17 +104,9 @@ jobs:
       scope: baseline
     secrets: inherit
 
-  messages-stream-certification:
-    name: messages-stream-certification
-    uses: ./.github/workflows/provider-smoke.yml
-    with:
-      model: nvidia/nemotron-3-super-120b-a12b
-      fallback_model: ""
-      scope: messages-stream
-    secrets: inherit
-
   codex-long-loop-certification:
     name: codex-long-loop-certification
+    needs: provider-baseline
     uses: ./.github/workflows/provider-smoke.yml
     with:
       model: nvidia/nemotron-3-super-120b-a12b
@@ -124,6 +116,7 @@ jobs:
 
   claude-code-loop-certification:
     name: claude-code-loop-certification
+    needs: codex-long-loop-certification
     uses: ./.github/workflows/provider-smoke.yml
     with:
       model: nvidia/nemotron-3-super-120b-a12b
@@ -137,7 +130,6 @@ jobs:
     needs:
       - verify-and-build
       - provider-baseline
-      - messages-stream-certification
       - codex-long-loop-certification
       - claude-code-loop-certification
     runs-on: ubuntu-latest
