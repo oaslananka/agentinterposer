@@ -98,3 +98,18 @@ func TestRenderAgentConfigRejectsNonHTTPGatewayURL(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderCodexConfigEscapesTOMLControlCharacters(t *testing.T) {
+	t.Parallel()
+
+	got, err := RenderCodexConfig("provider/model\x7fvariant", "http://127.0.0.1:11435")
+	if err != nil {
+		t.Fatalf("RenderCodexConfig() error = %v", err)
+	}
+	if strings.ContainsRune(got, '\x7f') {
+		t.Fatalf("Codex config contains an unescaped TOML control character: %q", got)
+	}
+	if !strings.Contains(got, `model = "provider/model\u007Fvariant"`) {
+		t.Fatalf("Codex config does not contain TOML-safe escaped model: %q", got)
+	}
+}

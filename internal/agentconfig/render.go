@@ -27,7 +27,7 @@ env_key = "AGENTINTERPOSER_CLIENT_KEY"
 wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0
-`, quoteConfig(model), quoteConfig(baseURL+"/v1")), nil
+`, quoteTOMLBasicString(model), quoteTOMLBasicString(baseURL+"/v1")), nil
 }
 
 func RenderOpenCodeConfig(model, gatewayURL string) (string, error) {
@@ -89,9 +89,36 @@ func validateInputs(model, gatewayURL string) (string, string, error) {
 	return model, strings.TrimRight(parsed.String(), "/"), nil
 }
 
-func quoteConfig(value string) string {
-	encoded, _ := json.Marshal(value)
-	return string(encoded)
+func quoteTOMLBasicString(value string) string {
+	var quoted strings.Builder
+	quoted.Grow(len(value) + 2)
+	quoted.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '"':
+			quoted.WriteString(`\"`)
+		case '\\':
+			quoted.WriteString(`\\`)
+		case '\b':
+			quoted.WriteString(`\b`)
+		case '\t':
+			quoted.WriteString(`\t`)
+		case '\n':
+			quoted.WriteString(`\n`)
+		case '\f':
+			quoted.WriteString(`\f`)
+		case '\r':
+			quoted.WriteString(`\r`)
+		default:
+			if r <= 0x1f || r == 0x7f {
+				fmt.Fprintf(&quoted, `\u%04X`, r)
+				continue
+			}
+			quoted.WriteRune(r)
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 func quoteShell(value string) string {
