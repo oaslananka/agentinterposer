@@ -76,6 +76,29 @@ OpenAI Responses uses native passthrough through the same reliability core. The 
 
 ## Quick start
 
+### Install the latest release
+
+GitHub Releases provide prebuilt archives for Linux, macOS, and Windows on amd64 and arm64. The following Linux amd64 example downloads the latest release, verifies its SHA-256 checksum, verifies the immutable GitHub Release attestation and asset membership, verifies the archive build provenance, and then extracts the binary:
+
+```bash
+mkdir -p /tmp/agentinterposer-release
+cd /tmp/agentinterposer-release
+
+gh release download --repo oaslananka/agentinterposer \
+  --pattern 'agentinterposer-*-linux-amd64.tar.gz' \
+  --pattern 'SHA256SUMS'
+
+archive=$(ls agentinterposer-*-linux-amd64.tar.gz)
+sha256sum --ignore-missing -c SHA256SUMS
+gh release verify --repo oaslananka/agentinterposer
+gh release verify-asset "$archive" --repo oaslananka/agentinterposer
+gh attestation verify "$archive" --repo oaslananka/agentinterposer
+tar -xzf "$archive"
+./agentinterposer --version
+```
+
+The verification commands require GitHub CLI. The checksum command above uses GNU `sha256sum`; use your platform's equivalent when installing another archive.
+
 ### Build from source
 
 Development currently targets Go `1.26.6`.
