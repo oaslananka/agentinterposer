@@ -113,13 +113,13 @@ jobs:
       scope: messages-stream
     secrets: inherit
 
-  codex-four-tool-loop-certification:
-    name: codex-four-tool-loop-certification
+  codex-long-loop-certification:
+    name: codex-long-loop-certification
     uses: ./.github/workflows/provider-smoke.yml
     with:
       model: nvidia/nemotron-3-super-120b-a12b
       fallback_model: ""
-      scope: codex-four-tool-loop
+      scope: codex-long-loop
     secrets: inherit
 
   claude-code-loop-certification:
@@ -138,7 +138,7 @@ jobs:
       - verify-and-build
       - provider-baseline
       - messages-stream-certification
-      - codex-four-tool-loop-certification
+      - codex-long-loop-certification
       - claude-code-loop-certification
     runs-on: ubuntu-latest
     timeout-minutes: 10
