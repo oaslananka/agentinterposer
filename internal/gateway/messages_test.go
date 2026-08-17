@@ -815,6 +815,27 @@ func intPtr(value int) *int {
 	return &value
 }
 
+func assertMessagesRejectedBeforeUpstream(t *testing.T, body, wantError string) {
+	t.Helper()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	response := serveMessages(handler, body)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+	if wantError != "" && !strings.Contains(response.Body.String(), wantError) {
+		t.Fatalf("body = %s, want error containing %q", response.Body.String(), wantError)
+	}
+}
+
 func TestHandlerRejectsUnsupportedAnthropicParametersBeforeUpstream(t *testing.T) {
 	t.Parallel()
 
@@ -823,90 +844,28 @@ func TestHandlerRejectsUnsupportedAnthropicParametersBeforeUpstream(t *testing.T
 		body      string
 		wantError string
 	}{
-		{
-			name:      "top_k",
-			body:      `{"model":"nvidia/test","max_tokens":32,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`,
-			wantError: "top_k",
-		},
-		{
-			name:      "service_tier",
-			body:      `{"model":"nvidia/test","max_tokens":32,"service_tier":"auto","messages":[{"role":"user","content":"hi"}]}`,
-			wantError: "service_tier",
-		},
-		{
-			name:      "max_tokens_zero",
-			body:      `{"model":"nvidia/test","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`,
-			wantError: "max_tokens=0",
-		},
-		{
-			name:      "max_tokens_missing",
-			body:      `{"model":"nvidia/test","messages":[{"role":"user","content":"hi"}]}`,
-			wantError: "max_tokens is required",
-		},
+		{name: "top_k", body: `{"model":"nvidia/test","max_tokens":32,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`, wantError: "top_k"},
+		{name: "service_tier", body: `{"model":"nvidia/test","max_tokens":32,"service_tier":"auto","messages":[{"role":"user","content":"hi"}]}`, wantError: "service_tier"},
+		{name: "max_tokens_zero", body: `{"model":"nvidia/test","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`, wantError: "max_tokens=0"},
+		{name: "max_tokens_missing", body: `{"model":"nvidia/test","messages":[{"role":"user","content":"hi"}]}`, wantError: "max_tokens is required"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-
-			var calls atomic.Int32
-			handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"id":"chatcmpl-ignored","model":"nvidia/test","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
-			}))
-
-			response := serveMessages(handler, test.body)
-			if response.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
-			}
-			if calls.Load() != 0 {
-				t.Fatalf("upstream calls = %d, want 0", calls.Load())
-			}
-			if !strings.Contains(response.Body.String(), test.wantError) {
-				t.Fatalf("body = %s, want error containing %q", response.Body.String(), test.wantError)
-			}
+			assertMessagesRejectedBeforeUpstream(t, test.body, test.wantError)
 		})
 	}
 }
 
 func TestHandlerRejectsUnknownAnthropicRequestFieldBeforeUpstream(t *testing.T) {
 	t.Parallel()
-
-	var calls atomic.Int32
-	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"future_semantic_field":{"enabled":true},"messages":[{"role":"user","content":"hi"}]}`)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
-	}
-	if calls.Load() != 0 {
-		t.Fatalf("upstream calls = %d, want 0", calls.Load())
-	}
-	if !strings.Contains(response.Body.String(), "future_semantic_field") {
-		t.Fatalf("body = %s, want unknown field name", response.Body.String())
-	}
+	assertMessagesRejectedBeforeUpstream(t, `{"model":"nvidia/test","max_tokens":32,"future_semantic_field":{"enabled":true},"messages":[{"role":"user","content":"hi"}]}`, "future_semantic_field")
 }
 
 func TestHandlerRejectsTrailingAnthropicJSONBeforeUpstream(t *testing.T) {
 	t.Parallel()
-
-	var calls atomic.Int32
-	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]} {}`)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
-	}
-	if calls.Load() != 0 {
-		t.Fatalf("upstream calls = %d, want 0", calls.Load())
-	}
+	assertMessagesRejectedBeforeUpstream(t, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]} {}`, "")
 }
 
 func TestHandlerRejectsCurrentUnsupportedAnthropicTopLevelFields(t *testing.T) {
@@ -927,23 +886,30 @@ func TestHandlerRejectsCurrentUnsupportedAnthropicTopLevelFields(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			var calls atomic.Int32
-			handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				w.WriteHeader(http.StatusOK)
-			}))
-
 			body := `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}],"` + test.field + `":` + test.value + `}`
-			response := serveMessages(handler, body)
-			if response.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
-			}
-			if calls.Load() != 0 {
-				t.Fatalf("upstream calls = %d, want 0", calls.Load())
-			}
-			if !strings.Contains(response.Body.String(), test.field) {
-				t.Fatalf("body = %s, want field name %q", response.Body.String(), test.field)
-			}
+			assertMessagesRejectedBeforeUpstream(t, body, test.field)
+		})
+	}
+}
+
+func TestHandlerRejectsOutOfRangeAnthropicSamplingParametersBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		body      string
+		wantError string
+	}{
+		{name: "temperature_below_zero", body: `{"model":"nvidia/test","max_tokens":32,"temperature":-0.01,"messages":[{"role":"user","content":"hi"}]}`, wantError: "temperature"},
+		{name: "temperature_above_one", body: `{"model":"nvidia/test","max_tokens":32,"temperature":1.01,"messages":[{"role":"user","content":"hi"}]}`, wantError: "temperature"},
+		{name: "top_p_below_zero", body: `{"model":"nvidia/test","max_tokens":32,"top_p":-0.01,"messages":[{"role":"user","content":"hi"}]}`, wantError: "top_p"},
+		{name: "top_p_above_one", body: `{"model":"nvidia/test","max_tokens":32,"top_p":1.01,"messages":[{"role":"user","content":"hi"}]}`, wantError: "top_p"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assertMessagesRejectedBeforeUpstream(t, test.body, test.wantError)
 		})
 	}
 }
