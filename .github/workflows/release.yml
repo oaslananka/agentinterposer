@@ -95,10 +95,51 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  provider-baseline:
+    name: provider-baseline
+    uses: ./.github/workflows/provider-smoke.yml
+    with:
+      model: nvidia/nemotron-3-super-120b-a12b
+      fallback_model: ""
+      scope: baseline
+    secrets: inherit
+
+  messages-stream-certification:
+    name: messages-stream-certification
+    uses: ./.github/workflows/provider-smoke.yml
+    with:
+      model: nvidia/nemotron-3-super-120b-a12b
+      fallback_model: ""
+      scope: messages-stream
+    secrets: inherit
+
+  codex-long-loop-certification:
+    name: codex-long-loop-certification
+    uses: ./.github/workflows/provider-smoke.yml
+    with:
+      model: nvidia/nemotron-3-super-120b-a12b
+      fallback_model: ""
+      scope: codex-long-loop
+    secrets: inherit
+
+  claude-code-loop-certification:
+    name: claude-code-loop-certification
+    uses: ./.github/workflows/provider-smoke.yml
+    with:
+      model: nvidia/nemotron-3-super-120b-a12b
+      fallback_model: ""
+      scope: claude-code-loop
+    secrets: inherit
+
   publish:
     name: publish
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: verify-and-build
+    needs:
+      - verify-and-build
+      - provider-baseline
+      - messages-stream-certification
+      - codex-long-loop-certification
+      - claude-code-loop-certification
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

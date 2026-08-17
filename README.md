@@ -240,7 +240,7 @@ Near-term work is intentionally compatibility-first:
 
 ## Releases
 
-Tagged releases use the `vMAJOR.MINOR.PATCH` form. The release workflow runs vet, race-enabled tests, and `govulncheck` before producing Linux, macOS, and Windows archives for amd64 and arm64. Published assets include `SHA256SUMS`, and build metadata is embedded so `agentinterposer --version` reports the release tag and source commit. A vulnerability finding in reachable Go code blocks publication.
+Tagged releases use the `vMAJOR.MINOR.PATCH` form. The release workflow runs vet, race-enabled tests, and `govulncheck` before producing Linux, macOS, and Windows archives for amd64 and arm64. In parallel, publication requires hosted certification for the NVIDIA baseline, Messages streaming, the certified three-tool Codex Responses loop, and the certified dependent Claude Code Messages loop. Published assets include `SHA256SUMS`, and build metadata is embedded so `agentinterposer --version` reports the release tag and source commit. A reachable Go vulnerability or failed hosted certification blocks publication.
 
 ## Security
 
