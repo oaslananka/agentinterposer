@@ -870,6 +870,84 @@ func TestHandlerRejectsUnsupportedAnthropicParametersBeforeUpstream(t *testing.T
 	}
 }
 
+func TestHandlerRejectsUnknownAnthropicRequestFieldBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"future_semantic_field":{"enabled":true},"messages":[{"role":"user","content":"hi"}]}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+	if !strings.Contains(response.Body.String(), "future_semantic_field") {
+		t.Fatalf("body = %s, want unknown field name", response.Body.String())
+	}
+}
+
+func TestHandlerRejectsTrailingAnthropicJSONBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]} {}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+}
+
+func TestHandlerRejectsCurrentUnsupportedAnthropicTopLevelFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "cache_control", field: "cache_control", value: `{"type":"ephemeral"}`},
+		{name: "container", field: "container", value: `"container-id"`},
+		{name: "inference_geo", field: "inference_geo", value: `"us"`},
+		{name: "output_config", field: "output_config", value: `{"effort":"low"}`},
+		{name: "user_profile_id", field: "anthropic-user-profile-id", value: `"profile-id"`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			body := `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}],"` + test.field + `":` + test.value + `}`
+			response := serveMessages(handler, body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("upstream calls = %d, want 0", calls.Load())
+			}
+			if !strings.Contains(response.Body.String(), test.field) {
+				t.Fatalf("body = %s, want field name %q", response.Body.String(), test.field)
+			}
+		})
+	}
+}
+
 func serveMessages(handler http.Handler, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")

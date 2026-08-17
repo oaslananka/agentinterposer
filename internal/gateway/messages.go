@@ -174,8 +174,14 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var request anthropicMessagesRequest
-	if err := json.Unmarshal(body, &request); err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON request body")
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON request body: "+err.Error())
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON request body: trailing JSON value")
 		return
 	}
 	if len(bytes.TrimSpace(request.Thinking)) > 0 && string(bytes.TrimSpace(request.Thinking)) != "null" {
