@@ -45,6 +45,9 @@ jobs:
       - name: Test with race detector
         run: go test -race ./...
 
+      - name: Scan reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
       - name: Build native binary
         run: go build ./cmd/agentinterposer
 
