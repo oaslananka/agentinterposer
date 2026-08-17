@@ -82,6 +82,49 @@ func TestRenderOpenCodeConfigUsesOpenAICompatibleProvider(t *testing.T) {
 	}
 }
 
+func TestRenderContinueConfigUsesOpenAICompatibleGateway(t *testing.T) {
+	t.Parallel()
+
+	got, err := RenderContinueConfig(certifiedModel, "http://127.0.0.1:11435")
+	if err != nil {
+		t.Fatalf("RenderContinueConfig() error = %v", err)
+	}
+	for _, want := range []string{
+		`name: "AgentInterposer"`,
+		`schema: v1`,
+		`provider: openai`,
+		`model: "nvidia/nemotron-3-super-120b-a12b"`,
+		`apiBase: "http://127.0.0.1:11435/v1"`,
+		`apiKey: "agentinterposer-local-placeholder"`,
+		`useResponsesApi: false`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Continue config missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"NVIDIA_API_KEY", "DOPPLER_TOKEN", "sk-"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("Continue config contains forbidden secret-like value %q", forbidden)
+		}
+	}
+}
+
+func TestRenderContinueConfigEscapesYAMLControlCharacters(t *testing.T) {
+	t.Parallel()
+
+	model := "provider/model\"\nroles:\n  - embed"
+	got, err := RenderContinueConfig(model, "http://127.0.0.1:11435")
+	if err != nil {
+		t.Fatalf("RenderContinueConfig() error = %v", err)
+	}
+	if strings.Contains(got, "\nroles:\n") {
+		t.Fatalf("Continue config allowed model text to inject YAML structure: %q", got)
+	}
+	if !strings.Contains(got, `model: "provider/model\"\nroles:\n  - embed"`) {
+		t.Fatalf("Continue config did not safely quote model text: %q", got)
+	}
+}
+
 func TestRenderAgentConfigRejectsNonHTTPGatewayURL(t *testing.T) {
 	t.Parallel()
 
@@ -89,6 +132,7 @@ func TestRenderAgentConfigRejectsNonHTTPGatewayURL(t *testing.T) {
 		"codex":       RenderCodexConfig,
 		"claude-code": RenderClaudeCodeEnv,
 		"opencode":    RenderOpenCodeConfig,
+		"continue":    RenderContinueConfig,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

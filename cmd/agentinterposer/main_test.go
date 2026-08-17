@@ -123,6 +123,33 @@ func TestRunConfigCommandPrintsOpenCodeConfig(t *testing.T) {
 	}
 }
 
+func TestRunConfigCommandPrintsContinueConfig(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr strings.Builder
+	handled, exitCode := runConfigCommand(
+		[]string{"config", "continue", "nvidia/nemotron-3-super-120b-a12b"},
+		&stdout,
+		&stderr,
+	)
+	if !handled || exitCode != 0 {
+		t.Fatalf("runConfigCommand() = handled:%v exit:%d stderr:%q", handled, exitCode, stderr.String())
+	}
+	for _, want := range []string{
+		`provider: openai`,
+		`apiBase: "http://127.0.0.1:11435/v1"`,
+		`apiKey: "agentinterposer-local-placeholder"`,
+		`useResponsesApi: false`,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing Continue config %q:\n%s", want, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestRunConfigCommandRejectsUnknownClient(t *testing.T) {
 	t.Parallel()
 
@@ -131,7 +158,7 @@ func TestRunConfigCommandRejectsUnknownClient(t *testing.T) {
 	if !handled || exitCode != 2 {
 		t.Fatalf("runConfigCommand() = handled:%v exit:%d", handled, exitCode)
 	}
-	if !strings.Contains(stderr.String(), "codex|claude-code|opencode") {
+	if !strings.Contains(stderr.String(), "codex|claude-code|opencode|continue") {
 		t.Fatalf("stderr = %q, want supported client usage", stderr.String())
 	}
 }

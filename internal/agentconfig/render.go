@@ -59,6 +59,26 @@ func RenderOpenCodeConfig(model, gatewayURL string) (string, error) {
 	return string(encoded) + "\n", nil
 }
 
+func RenderContinueConfig(model, gatewayURL string) (string, error) {
+	model, baseURL, err := validateInputs(model, gatewayURL)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf(`name: %s
+version: "0.0.1"
+schema: v1
+
+models:
+  - name: %s
+    provider: openai
+    model: %s
+    apiBase: %s
+    apiKey: %s
+    useResponsesApi: false
+`, quoteYAMLString("AgentInterposer"), quoteYAMLString("AgentInterposer: "+model), quoteYAMLString(model), quoteYAMLString(baseURL+"/v1"), quoteYAMLString(localClientPlaceholder)), nil
+}
+
 func RenderClaudeCodeEnv(model, gatewayURL string) (string, error) {
 	model, baseURL, err := validateInputs(model, gatewayURL)
 	if err != nil {
@@ -87,6 +107,11 @@ func validateInputs(model, gatewayURL string) (string, string, error) {
 		parsed.Path = strings.TrimSuffix(parsed.Path, "/v1")
 	}
 	return model, strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func quoteYAMLString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 func quoteTOMLBasicString(value string) string {
