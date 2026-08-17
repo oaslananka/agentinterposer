@@ -1,6 +1,20 @@
 name: Provider Smoke
 
 on:
+  workflow_call:
+    inputs:
+      model:
+        required: false
+        default: nvidia/nemotron-3-super-120b-a12b
+        type: string
+      fallback_model:
+        required: false
+        default: ""
+        type: string
+      scope:
+        required: false
+        default: baseline
+        type: string
   workflow_dispatch:
     inputs:
       model:

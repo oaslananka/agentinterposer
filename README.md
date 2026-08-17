@@ -150,7 +150,7 @@ curl http://127.0.0.1:11435/v1/responses \
   }'
 ```
 
-This establishes the transport needed by Responses-based clients. The manual `Provider Smoke` workflow can run `scope=codex` for the current single shell-tool certification path, `scope=codex-loop` for a dependent two-tool path where the second shell result must be the SHA-256 digest of the first tool's unpredictable UUID output, and `scope=codex-long-loop` for a dependent three-tool path where the third result must be the SHA-256 digest of the second result. All three use Codex CLI `0.147.0` -> AgentInterposer -> NVIDIA hosted Responses with `nvidia/nemotron-3-super-120b-a12b`. Other Codex versions, models, broader tool surfaces, and loops beyond the current three-tool profile remain uncertified.
+This establishes the transport needed by Responses-based clients. A daily `Provider Drift` workflow runs the lightweight hosted `baseline` probe so obvious provider drift is detected without paying the cost or accepting the flakiness of the full certification matrix on every change. The manual `Provider Smoke` workflow can run `scope=codex` for the current single shell-tool certification path, `scope=codex-loop` for a dependent two-tool path where the second shell result must be the SHA-256 digest of the first tool's unpredictable UUID output, and `scope=codex-long-loop` for a dependent three-tool path where the third result must be the SHA-256 digest of the second result. All three use Codex CLI `0.147.0` -> AgentInterposer -> NVIDIA hosted Responses with `nvidia/nemotron-3-super-120b-a12b`. Other Codex versions, models, broader tool surfaces, and loops beyond the current three-tool profile remain uncertified.
 
 Send an Anthropic Messages request:
 

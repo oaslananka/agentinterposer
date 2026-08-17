@@ -1,0 +1,23 @@
+name: Provider Drift
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-drift-main
+  cancel-in-progress: false
+
+jobs:
+  nvidia-baseline:
+    name: nvidia-baseline
+    uses: ./.github/workflows/provider-smoke.yml
+    with:
+      model: nvidia/nemotron-3-super-120b-a12b
+      fallback_model: ""
+      scope: baseline
+    secrets: inherit
