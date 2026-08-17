@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -58,7 +59,14 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("missing upstream bearer token: set NVIDIA_API_KEY or AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN")
 	}
 
-	var err error
+	allowRemote, err := parseAllowRemote(getenv("AGENTINTERPOSER_ALLOW_REMOTE"))
+	if err != nil {
+		return Config{}, err
+	}
+	if err := validateListenAddr(cfg.ListenAddr, allowRemote); err != nil {
+		return Config{}, err
+	}
+
 	if cfg.FallbackModels, err = fallbackModels(getenv("AGENTINTERPOSER_FALLBACK_MODELS")); err != nil {
 		return Config{}, err
 	}
@@ -82,6 +90,34 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseAllowRemote(raw string) (bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, errors.New("AGENTINTERPOSER_ALLOW_REMOTE must be a boolean")
+	}
+	return value, nil
+}
+
+func validateListenAddr(addr string, allowRemote bool) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("AGENTINTERPOSER_ADDR must be a host:port listen address: %w", err)
+	}
+	if allowRemote {
+		return nil
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return errors.New("AGENTINTERPOSER_ADDR must use a loopback host unless AGENTINTERPOSER_ALLOW_REMOTE=true")
 }
 
 func valueOrDefault(value, fallback string) string {

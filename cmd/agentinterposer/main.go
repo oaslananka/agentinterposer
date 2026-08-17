@@ -19,7 +19,18 @@ import (
 	"github.com/oaslananka/agentinterposer/internal/gateway"
 )
 
+var (
+	version = "dev"
+	commit  = ""
+)
+
 func main() {
+	if handled, exitCode := runMetaCommand(os.Args[1:], os.Stdout, os.Stderr); handled {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return
+	}
 	if handled, exitCode := runCapabilitiesCommand(os.Args[1:], os.Stdout, os.Stderr); handled {
 		if exitCode != 0 {
 			os.Exit(exitCode)
@@ -55,6 +66,40 @@ func main() {
 }
 
 const defaultConfigGatewayURL = "http://127.0.0.1:11435"
+
+func runMetaCommand(args []string, stdout, stderr io.Writer) (bool, int) {
+	if len(args) != 1 {
+		return false, 0
+	}
+	switch args[0] {
+	case "help", "--help", "-h":
+		printUsage(stdout)
+		return true, 0
+	case "version", "--version":
+		if commit == "" {
+			fmt.Fprintf(stdout, "agentinterposer %s\n", version)
+		} else {
+			fmt.Fprintf(stdout, "agentinterposer %s (%s)\n", version, commit)
+		}
+		return true, 0
+	default:
+		return false, 0
+	}
+}
+
+func printUsage(w io.Writer) {
+	_, _ = io.WriteString(w, `usage: agentinterposer [command]
+
+Commands:
+  capabilities <model>                         Print certified model capabilities as JSON
+  config <codex|claude-code|opencode> <model> [gateway-url]
+                                               Print secret-free client configuration
+  version                                      Print build version
+  help                                         Print this help
+
+With no command, AgentInterposer starts the local gateway using environment configuration.
+`)
+}
 
 func runCapabilitiesCommand(args []string, stdout, stderr io.Writer) (bool, int) {
 	if len(args) == 0 || args[0] != "capabilities" {
