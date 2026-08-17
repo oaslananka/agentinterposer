@@ -54,6 +54,7 @@ on:
           - codex
           - codex-loop
           - codex-long-loop
+          - codex-four-tool-loop
 
 permissions:
   contents: read
@@ -1541,7 +1542,7 @@ jobs:
           fi
 
       - name: Probe Codex Responses tool round trip
-        if: ${{ inputs.scope == 'codex' || inputs.scope == 'codex-loop' || inputs.scope == 'codex-long-loop' }}
+        if: ${{ inputs.scope == 'codex' || inputs.scope == 'codex-loop' || inputs.scope == 'codex-long-loop' || inputs.scope == 'codex-four-tool-loop' }}
         id: codex
         shell: bash
         env:
@@ -1748,7 +1749,9 @@ jobs:
           fi
           echo 'codex_isolated_launcher=ok'
 
-          if [ "$SCOPE" = 'codex-long-loop' ]; then
+          if [ "$SCOPE" = 'codex-four-tool-loop' ]; then
+            prompt='Run exactly four shell commands, sequentially. First run `cat /proc/sys/kernel/random/uuid`. After each tool result, strip surrounding whitespace and run exactly one new shell command that computes the lowercase SHA-256 hex digest of exactly the immediately previous stdout value. Commands two through four must each derive their literal input from the immediately previous tool result; do not guess, reuse a cached value, use an environment variable, combine steps, or skip a tool call. After the fourth command completes, reply with exactly its 64-character lowercase SHA-256 digest and nothing else.'
+          elif [ "$SCOPE" = 'codex-long-loop' ]; then
             prompt='Run exactly three shell commands, sequentially. First run `cat /proc/sys/kernel/random/uuid`. After you receive that stdout, strip its trailing newline and run a second shell command that computes the lowercase SHA-256 hex digest of exactly that UUID value. After you receive the second stdout, strip surrounding whitespace and run a third shell command that computes the lowercase SHA-256 hex digest of exactly the 64-character digest produced by the second command. Each later command must derive its literal input from the immediately previous tool result; do not guess, reuse a cached value, use an environment variable, or skip a tool call. After the third command completes, reply with exactly its 64-character lowercase SHA-256 digest and nothing else.'
           elif [ "$SCOPE" = 'codex-loop' ]; then
             prompt='Run exactly two shell commands, sequentially. First run `cat /proc/sys/kernel/random/uuid`. After you receive that command stdout, strip its trailing newline and run a second shell command that computes the SHA-256 hex digest of exactly that UUID value. The second command must derive its input from the first command result; do not guess, reuse a cached value, or skip either tool call. After the second command completes, reply with exactly the 64-character lowercase SHA-256 digest and nothing else.'
@@ -1824,7 +1827,7 @@ jobs:
               print(f"codex_command_result_{index}=status:{status},exit:{exit_code},output_bytes:{output_bytes}")
           print("codex_completed_command_count=" + str(len(command_results)))
 
-          expected_commands = 3 if scope == "codex-long-loop" else 2 if scope == "codex-loop" else 1
+          expected_commands = 4 if scope == "codex-four-tool-loop" else 3 if scope == "codex-long-loop" else 2 if scope == "codex-loop" else 1
           if len(command_results) != expected_commands or len(successful_outputs) != expected_commands:
               raise SystemExit(f"Codex did not complete exactly {expected_commands} successful shell command(s)")
 
@@ -1841,7 +1844,7 @@ jobs:
               raise SystemExit("Codex produced no final response file")
           print("codex_final_bytes=" + str(len(final.encode("utf-8"))))
 
-          if scope in {"codex-loop", "codex-long-loop"}:
+          if scope in {"codex-loop", "codex-long-loop", "codex-four-tool-loop"}:
               expected_hash = hashlib.sha256(tool_uuid.encode("utf-8")).hexdigest()
               hash_pattern = re.compile(r"\b[0-9a-f]{64}\b", re.IGNORECASE)
               second_match = hash_pattern.search(successful_outputs[1])
@@ -1852,7 +1855,7 @@ jobs:
                   raise SystemExit("Second shell command output did not contain the SHA-256 digest of the first tool result")
 
               final_expected = expected_hash
-              if scope == "codex-long-loop":
+              if scope in {"codex-long-loop", "codex-four-tool-loop"}:
                   third_expected = hashlib.sha256(expected_hash.encode("utf-8")).hexdigest()
                   third_match = hash_pattern.search(successful_outputs[2])
                   third_hash = third_match.group(0).lower() if third_match else None
@@ -1861,6 +1864,16 @@ jobs:
                   if not third_matches:
                       raise SystemExit("Third shell command output did not contain the SHA-256 digest of the second tool result")
                   final_expected = third_expected
+
+              if scope == "codex-four-tool-loop":
+                  fourth_expected = hashlib.sha256(third_expected.encode("utf-8")).hexdigest()
+                  fourth_match = hash_pattern.search(successful_outputs[3])
+                  fourth_hash = fourth_match.group(0).lower() if fourth_match else None
+                  fourth_matches = fourth_hash == fourth_expected
+                  print("codex_four_tool_hash_matches_third_tool=" + str(fourth_matches).lower())
+                  if not fourth_matches:
+                      raise SystemExit("Fourth shell command output did not contain the SHA-256 digest of the third tool result")
+                  final_expected = fourth_expected
 
               final_matches = final.strip().lower() == final_expected
               print("codex_final_matches_expected_hash=" + str(final_matches).lower())
@@ -1884,7 +1897,10 @@ jobs:
 
           echo 'codex_responses_streaming=ok'
           echo 'codex_function_call_round_trip=ok'
-          if [ "$SCOPE" = 'codex-long-loop' ]; then
+          if [ "$SCOPE" = 'codex-four-tool-loop' ]; then
+            echo 'codex_dependent_four_tool_loop=ok'
+            echo 'codex_four_tool_loop_verified=true' >> "$GITHUB_OUTPUT"
+          elif [ "$SCOPE" = 'codex-long-loop' ]; then
             echo 'codex_dependent_three_tool_loop=ok'
             echo 'codex_long_loop_verified=true' >> "$GITHUB_OUTPUT"
           elif [ "$SCOPE" = 'codex-loop' ]; then
@@ -1924,6 +1940,7 @@ jobs:
           CODEX_VERIFIED: ${{ steps.codex.outputs.codex_verified }}
           CODEX_LOOP_VERIFIED: ${{ steps.codex.outputs.codex_loop_verified }}
           CODEX_LONG_LOOP_VERIFIED: ${{ steps.codex.outputs.codex_long_loop_verified }}
+          CODEX_FOUR_TOOL_LOOP_VERIFIED: ${{ steps.codex.outputs.codex_four_tool_loop_verified }}
         run: |
           {
             echo '## NVIDIA hosted compatibility probe'
@@ -1939,6 +1956,9 @@ jobs:
             elif [ "$SCOPE" = 'codex-long-loop' ]; then
               echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
               echo "- Codex dependent three-tool Responses loop: ${CODEX_LONG_LOOP_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'codex-four-tool-loop' ]; then
+              echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
+              echo "- Codex dependent four-tool Responses loop: ${CODEX_FOUR_TOOL_LOOP_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'claude-code' ]; then
               echo "- Claude Code CLI 2.1.233 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code Messages tool round trip: ${CLAUDE_CODE_VERIFIED:-not-verified}"

@@ -80,6 +80,7 @@ var builtinProfiles = map[string]Profile{
 			{Client: certifiedCodexClient, Version: certifiedCodexVersion, Scenario: "single-tool"},
 			{Client: certifiedCodexClient, Version: certifiedCodexVersion, Scenario: "dependent-tool-loop"},
 			{Client: certifiedCodexClient, Version: certifiedCodexVersion, Scenario: "dependent-three-tool-loop"},
+			{Client: certifiedCodexClient, Version: certifiedCodexVersion, Scenario: "dependent-four-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "single-tool"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "dependent-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "error-recovery"},
