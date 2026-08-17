@@ -243,7 +243,7 @@ Near-term work is intentionally compatibility-first:
 
 Tagged releases use the `vMAJOR.MINOR.PATCH` form. The release workflow runs vet, race-enabled tests, and `govulncheck` before producing Linux, macOS, and Windows archives for amd64 and arm64. Publication also requires a serialized hosted certification chain for the NVIDIA baseline, the certified three-tool Codex Responses loop, and the certified dependent Claude Code Messages loop; serial execution avoids overlapping hosted probes from interfering with one another. Published assets include `SHA256SUMS`, and each archive digest is covered by a GitHub artifact build-provenance attestation before upload. Build metadata is embedded so `agentinterposer --version` reports the release tag and source commit. A reachable Go vulnerability or failed hosted certification blocks publication.
 
-After downloading a release, GitHub CLI users can verify the published provenance for the whole release with `gh release verify <tag> --repo oaslananka/agentinterposer`; the checksum file remains available for conventional SHA-256 verification.
+The publish job creates a draft release, attaches all verified assets, and only then publishes it. Repository release immutability is enabled for future releases, so publication locks the tag and assets and causes GitHub to generate a release-level attestation. The per-archive build provenance and the release-level attestation serve different purposes: use `gh attestation verify <archive> --repo oaslananka/agentinterposer` to verify build provenance for a downloaded archive, and `gh release verify <tag> --repo oaslananka/agentinterposer` (or `gh release verify-asset <tag> <archive>`) to verify an immutable GitHub Release and its published asset set.
 
 ## Security
 
