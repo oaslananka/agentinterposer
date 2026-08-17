@@ -191,11 +191,12 @@ The binary can print secret-free client configuration without starting the gatew
 ./agentinterposer config codex nvidia/nemotron-3-super-120b-a12b
 ./agentinterposer config claude-code nvidia/nemotron-3-super-120b-a12b
 ./agentinterposer config opencode nvidia/nemotron-3-super-120b-a12b
+./agentinterposer config continue nvidia/nemotron-3-super-120b-a12b
 ```
 
-The Codex helper prints a `~/.codex/config.toml` fragment using AgentInterposer's Responses endpoint and an `AGENTINTERPOSER_CLIENT_KEY` local placeholder. The Claude Code helper prints shell exports for `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL`. The OpenCode helper prints an `opencode.json` custom provider using `@ai-sdk/openai-compatible`, the AgentInterposer `/v1` endpoint, an explicit model entry, and `{env:AGENTINTERPOSER_CLIENT_KEY}` for the local client credential. The placeholder client credentials are not upstream provider secrets; the real upstream bearer credential remains owned by the AgentInterposer server process.
+The Codex helper prints a `~/.codex/config.toml` fragment using AgentInterposer's Responses endpoint and an `AGENTINTERPOSER_CLIENT_KEY` local placeholder. The Claude Code helper prints shell exports for `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL`. The OpenCode helper prints an `opencode.json` custom provider using `@ai-sdk/openai-compatible`, the AgentInterposer `/v1` endpoint, an explicit model entry, and `{env:AGENTINTERPOSER_CLIENT_KEY}` for the local client credential. The Continue helper prints a `~/.continue/config.yaml` configuration for the Continue VS Code/JetBrains extension using its OpenAI-compatible provider, the AgentInterposer `/v1` endpoint, a harmless local placeholder API key, and `useResponsesApi: false` so generic model IDs stay on the Chat Completions path. This is a connection helper, not a Continue compatibility certification. The placeholder client credentials are not upstream provider secrets; the real upstream bearer token remains owned by the AgentInterposer server process.
 
-For a non-default gateway location, pass the root URL as the fourth argument, for example `https://gateway.example.test/agent`; the Codex renderer derives its `/v1` endpoint while Claude Code uses the gateway root.
+For a non-default gateway location, pass the root URL as the fourth argument, for example `https://gateway.example.test/agent`; the Codex, OpenCode, and Continue renderers derive their `/v1` endpoint while Claude Code uses the gateway root.
 
 ## Configuration
 
@@ -236,7 +237,7 @@ Near-term work is intentionally compatibility-first:
 3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
 4. Expand the model capability registry beyond the current Nemotron 3 Super, Nemotron 3 Nano, Nemotron 3 Nano Omni, and Llama 3.2 Vision evidence sets.
 5. Certify per-model upstream routes against additional providers and expand fallback coverage to multimodal/tool-bearing Responses.
-6. Expand the initial Codex, Claude Code, and OpenCode configuration helpers to compatible VS Code clients.
+6. Expand the initial Codex, Claude Code, OpenCode, and Continue configuration helpers to additional compatible IDE clients.
 
 ## Releases
 
