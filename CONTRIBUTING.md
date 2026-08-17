@@ -4,7 +4,7 @@ Thanks for helping improve AgentInterposer.
 
 ## Development setup
 
-Development currently targets Go `1.26.5`.
+Development currently targets Go `1.26.6`.
 
 ```bash
 git clone https://github.com/oaslananka/agentinterposer.git
