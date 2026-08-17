@@ -238,6 +238,10 @@ Near-term work is intentionally compatibility-first:
 5. Certify per-model upstream routes against additional providers and expand fallback coverage to multimodal/tool-bearing Responses.
 6. Expand the initial Codex, Claude Code, and OpenCode configuration helpers to compatible VS Code clients.
 
+## Releases
+
+Tagged releases use the `vMAJOR.MINOR.PATCH` form. The release workflow runs vet, race-enabled tests, and `govulncheck` before producing Linux, macOS, and Windows archives for amd64 and arm64. Published assets include `SHA256SUMS`, and build metadata is embedded so `agentinterposer --version` reports the release tag and source commit. A vulnerability finding in reachable Go code blocks publication.
+
 ## Security
 
 AgentInterposer handles provider credentials and model traffic. It refuses non-loopback `AGENTINTERPOSER_ADDR` values unless `AGENTINTERPOSER_ALLOW_REMOTE=true`. Keep it bound to loopback unless you deliberately add an authentication and network-security boundary in front of it. See [SECURITY.md](SECURITY.md) before reporting a vulnerability.
