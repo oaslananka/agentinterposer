@@ -297,6 +297,12 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	if request.ServiceTier != nil {
 		return chatCompletionRequest{}, errors.New("service_tier is not supported by the Messages adapter")
 	}
+	if request.Temperature != nil && (*request.Temperature < 0 || *request.Temperature > 1) {
+		return chatCompletionRequest{}, errors.New("temperature must be between 0 and 1")
+	}
+	if request.TopP != nil && (*request.TopP < 0 || *request.TopP > 1) {
+		return chatCompletionRequest{}, errors.New("top_p must be between 0 and 1")
+	}
 	if len(request.StopSequences) > 0 {
 		return chatCompletionRequest{}, errors.New("stop_sequences are not supported by the Messages adapter yet")
 	}
