@@ -10,10 +10,11 @@ const (
 	CapabilityToolCalling     Capability = "tool_calling"
 	CapabilityVisionInput     Capability = "vision_input"
 
-	certifiedCodexClient       = "codex"
-	certifiedCodexVersion      = "0.147.0"
-	certifiedClaudeCodeClient  = "claude-code"
-	certifiedClaudeCodeVersion = "2.1.226"
+	certifiedCodexClient             = "codex"
+	certifiedCodexVersion            = "0.147.0"
+	certifiedClaudeCodeClient        = "claude-code"
+	certifiedClaudeCodeVersion       = "2.1.226"
+	certifiedClaudeCodeLatestVersion = "2.1.233"
 )
 
 type Certification struct {
@@ -82,6 +83,9 @@ var builtinProfiles = map[string]Profile{
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "single-tool"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "dependent-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "error-recovery"},
+			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "single-tool"},
+			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "dependent-tool-loop"},
+			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "error-recovery"},
 		},
 	},
 }
