@@ -229,3 +229,89 @@ func TestLoadUsesSafeLocalDefaults(t *testing.T) {
 		t.Fatalf("MaxRequestBytes = %d, want %d", cfg.MaxRequestBytes, 32<<20)
 	}
 }
+
+func TestLoadRejectsRemoteListenAddressWithoutExplicitOptIn(t *testing.T) {
+	t.Parallel()
+
+	_, err := Load(func(key string) string {
+		switch key {
+		case "NVIDIA_API_KEY":
+			return "test-token"
+		case "AGENTINTERPOSER_ADDR":
+			return "0.0.0.0:11435"
+		default:
+			return ""
+		}
+	})
+	if err == nil {
+		t.Fatal("Load() accepted a non-loopback listen address without explicit opt-in")
+	}
+	if !strings.Contains(err.Error(), "AGENTINTERPOSER_ALLOW_REMOTE") {
+		t.Fatalf("error = %q, want explicit remote-bind opt-in guidance", err)
+	}
+}
+
+func TestLoadAllowsRemoteListenAddressWithExplicitOptIn(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(func(key string) string {
+		switch key {
+		case "NVIDIA_API_KEY":
+			return "test-token"
+		case "AGENTINTERPOSER_ADDR":
+			return "0.0.0.0:11435"
+		case "AGENTINTERPOSER_ALLOW_REMOTE":
+			return "true"
+		default:
+			return ""
+		}
+	})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ListenAddr != "0.0.0.0:11435" {
+		t.Fatalf("ListenAddr = %q", cfg.ListenAddr)
+	}
+}
+
+func TestLoadAllowsIPv6LoopbackWithoutRemoteOptIn(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(func(key string) string {
+		switch key {
+		case "NVIDIA_API_KEY":
+			return "test-token"
+		case "AGENTINTERPOSER_ADDR":
+			return "[::1]:11435"
+		default:
+			return ""
+		}
+	})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ListenAddr != "[::1]:11435" {
+		t.Fatalf("ListenAddr = %q", cfg.ListenAddr)
+	}
+}
+
+func TestLoadRejectsInvalidRemoteOptInValue(t *testing.T) {
+	t.Parallel()
+
+	_, err := Load(func(key string) string {
+		switch key {
+		case "NVIDIA_API_KEY":
+			return "test-token"
+		case "AGENTINTERPOSER_ALLOW_REMOTE":
+			return "definitely"
+		default:
+			return ""
+		}
+	})
+	if err == nil {
+		t.Fatal("Load() accepted an invalid AGENTINTERPOSER_ALLOW_REMOTE value")
+	}
+	if !strings.Contains(err.Error(), "AGENTINTERPOSER_ALLOW_REMOTE") {
+		t.Fatalf("error = %q, want remote opt-in validation", err)
+	}
+}

@@ -193,3 +193,53 @@ func TestRunCapabilitiesCommandRejectsUnknownModel(t *testing.T) {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
+
+func TestRunMetaCommandPrintsHelpWithoutProviderCredential(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{{"--help"}, {"help"}} {
+		var stdout, stderr strings.Builder
+		handled, exitCode := runMetaCommand(args, &stdout, &stderr)
+		if !handled || exitCode != 0 {
+			t.Fatalf("runMetaCommand(%v) = handled:%v exit:%d stderr:%q", args, handled, exitCode, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "usage: agentinterposer") || !strings.Contains(stdout.String(), "capabilities") || !strings.Contains(stdout.String(), "config") {
+			t.Fatalf("help output missing usage/subcommands:\n%s", stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q", stderr.String())
+		}
+	}
+}
+
+func TestRunMetaCommandPrintsVersionWithoutProviderCredential(t *testing.T) {
+	oldVersion, oldCommit := version, commit
+	version, commit = "v1.2.3", "abc1234"
+	t.Cleanup(func() {
+		version, commit = oldVersion, oldCommit
+	})
+
+	for _, args := range [][]string{{"--version"}, {"version"}} {
+		var stdout, stderr strings.Builder
+		handled, exitCode := runMetaCommand(args, &stdout, &stderr)
+		if !handled || exitCode != 0 {
+			t.Fatalf("runMetaCommand(%v) = handled:%v exit:%d stderr:%q", args, handled, exitCode, stderr.String())
+		}
+		if got := stdout.String(); got != "agentinterposer v1.2.3 (abc1234)\n" {
+			t.Fatalf("version output = %q", got)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q", stderr.String())
+		}
+	}
+}
+
+func TestRunMetaCommandIgnoresServerArguments(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr strings.Builder
+	handled, exitCode := runMetaCommand(nil, &stdout, &stderr)
+	if handled || exitCode != 0 {
+		t.Fatalf("runMetaCommand(nil) = handled:%v exit:%d, want not handled", handled, exitCode)
+	}
+}

@@ -103,6 +103,15 @@ The gateway starts on:
 http://127.0.0.1:11435
 ```
 
+AgentInterposer rejects non-loopback listen addresses by default. If you deliberately place a separate authentication and network-security boundary in front of the gateway, set `AGENTINTERPOSER_ALLOW_REMOTE=true` together with the non-loopback `AGENTINTERPOSER_ADDR`.
+
+Inspect the CLI without configuring a provider credential:
+
+```bash
+./agentinterposer --help
+./agentinterposer --version
+```
+
 Check health:
 
 ```bash
@@ -195,7 +204,8 @@ For a non-default gateway location, pass the root URL as the fourth argument, fo
 | `NVIDIA_API_KEY` | none | Bearer token for the default NVIDIA upstream |
 | `AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN` | falls back to `NVIDIA_API_KEY` | Generic upstream bearer token override |
 | `AGENTINTERPOSER_UPSTREAM_URL` | `https://integrate.api.nvidia.com` | OpenAI-compatible upstream base URL |
-| `AGENTINTERPOSER_ADDR` | `127.0.0.1:11435` | Local listen address |
+| `AGENTINTERPOSER_ADDR` | `127.0.0.1:11435` | Local listen address; non-loopback values require explicit remote opt-in |
+| `AGENTINTERPOSER_ALLOW_REMOTE` | `false` | Permit a non-loopback listen address; use only behind a deliberate authentication/network boundary |
 | `AGENTINTERPOSER_MAX_CONCURRENT` | `3` | Maximum simultaneous upstream requests |
 | `AGENTINTERPOSER_MAX_RETRIES` | `3` | Retries after the initial request |
 | `AGENTINTERPOSER_RETRY_BASE_DELAY` | `500ms` | Base duration for exponential backoff |
@@ -230,7 +240,7 @@ Near-term work is intentionally compatibility-first:
 
 ## Security
 
-AgentInterposer handles provider credentials and model traffic. Keep it bound to loopback unless you deliberately add an authentication boundary in front of it. See [SECURITY.md](SECURITY.md) before reporting a vulnerability.
+AgentInterposer handles provider credentials and model traffic. It refuses non-loopback `AGENTINTERPOSER_ADDR` values unless `AGENTINTERPOSER_ALLOW_REMOTE=true`. Keep it bound to loopback unless you deliberately add an authentication and network-security boundary in front of it. See [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
 ## Contributing
 
