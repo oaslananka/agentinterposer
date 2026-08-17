@@ -146,6 +146,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      attestations: read
 
     steps:
       - name: Download verified release assets
@@ -177,3 +178,24 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --draft=false
+
+      - name: Verify immutable release attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          attempts=12
+          for attempt in $(seq 1 "$attempts"); do
+            if output=$(gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" 2>&1); then
+              printf '%s\n' "$output"
+              exit 0
+            fi
+            if [[ "$attempt" -eq "$attempts" ]]; then
+              printf '%s\n' "$output" >&2
+              echo "Release attestation did not verify after ${attempts} attempts." >&2
+              exit 1
+            fi
+            echo "Release attestation not available yet; retrying (${attempt}/${attempts})."
+            sleep 5
+          done
