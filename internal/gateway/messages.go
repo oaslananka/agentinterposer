@@ -16,13 +16,15 @@ import (
 
 type anthropicMessagesRequest struct {
 	Model         string                  `json:"model"`
-	MaxTokens     int                     `json:"max_tokens"`
+	MaxTokens     *int                    `json:"max_tokens"`
 	Metadata      *anthropicMetadata      `json:"metadata"`
 	Messages      []anthropicInputMessage `json:"messages"`
 	System        json.RawMessage         `json:"system"`
 	Stream        bool                    `json:"stream"`
 	Temperature   *float64                `json:"temperature"`
+	TopK          *int                    `json:"top_k"`
 	TopP          *float64                `json:"top_p"`
+	ServiceTier   *string                 `json:"service_tier"`
 	StopSequences []string                `json:"stop_sequences"`
 	Tools         []anthropicTool         `json:"tools"`
 	ToolChoice    *anthropicToolChoice    `json:"tool_choice"`
@@ -274,8 +276,20 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	if strings.TrimSpace(request.Model) == "" {
 		return chatCompletionRequest{}, errors.New("model is required")
 	}
-	if request.MaxTokens < 0 {
+	if request.MaxTokens == nil {
+		return chatCompletionRequest{}, errors.New("max_tokens is required")
+	}
+	if *request.MaxTokens < 0 {
 		return chatCompletionRequest{}, errors.New("max_tokens must be non-negative")
+	}
+	if *request.MaxTokens == 0 {
+		return chatCompletionRequest{}, errors.New("max_tokens=0 prompt-cache-only requests are not supported by the Messages adapter")
+	}
+	if request.TopK != nil {
+		return chatCompletionRequest{}, errors.New("top_k is not supported by the Messages adapter")
+	}
+	if request.ServiceTier != nil {
+		return chatCompletionRequest{}, errors.New("service_tier is not supported by the Messages adapter")
 	}
 	if len(request.StopSequences) > 0 {
 		return chatCompletionRequest{}, errors.New("stop_sequences are not supported by the Messages adapter yet")
@@ -283,7 +297,7 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 
 	translated := chatCompletionRequest{
 		Model:       request.Model,
-		MaxTokens:   request.MaxTokens,
+		MaxTokens:   *request.MaxTokens,
 		Stream:      request.Stream,
 		Temperature: request.Temperature,
 		TopP:        request.TopP,
