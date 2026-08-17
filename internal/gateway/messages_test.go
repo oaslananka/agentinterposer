@@ -105,7 +105,7 @@ func TestTranslateAnthropicRequestAcceptsCompleteImmediateToolResults(t *testing
 
 	request := anthropicMessagesRequest{
 		Model:     "nvidia/test",
-		MaxTokens: 32,
+		MaxTokens: intPtr(32),
 		Messages: []anthropicInputMessage{
 			{Role: "assistant", Content: json.RawMessage(`[
 				{"type":"tool_use","id":"call_one","name":"one","input":{}},
@@ -142,7 +142,7 @@ func TestTranslateAnthropicRequestRejectsToolResultAfterInterveningMessage(t *te
 
 	request := anthropicMessagesRequest{
 		Model:     "nvidia/test",
-		MaxTokens: 32,
+		MaxTokens: intPtr(32),
 		Messages: []anthropicInputMessage{
 			{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_probe","name":"probe","input":{}}]`)},
 			{Role: "user", Content: json.RawMessage(`"intervening"`)},
@@ -164,7 +164,7 @@ func TestTranslateAnthropicRequestRejectsMissingToolResult(t *testing.T) {
 
 	request := anthropicMessagesRequest{
 		Model:     "nvidia/test",
-		MaxTokens: 32,
+		MaxTokens: intPtr(32),
 		Messages: []anthropicInputMessage{
 			{Role: "assistant", Content: json.RawMessage(`[
 				{"type":"tool_use","id":"call_one","name":"one","input":{}},
@@ -188,7 +188,7 @@ func TestTranslateAnthropicRequestRejectsUnmatchedToolResult(t *testing.T) {
 
 	request := anthropicMessagesRequest{
 		Model:     "nvidia/test",
-		MaxTokens: 32,
+		MaxTokens: intPtr(32),
 		Messages: []anthropicInputMessage{
 			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_unknown","content":"orphan"}]`)},
 		},
@@ -808,6 +808,65 @@ func TestHandlerRejectsAnthropicStopSequencesBeforeUpstream(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "stop_sequences") {
 		t.Fatalf("body = %s, want stop_sequences error", response.Body.String())
+	}
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func TestHandlerRejectsUnsupportedAnthropicParametersBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		body      string
+		wantError string
+	}{
+		{
+			name:      "top_k",
+			body:      `{"model":"nvidia/test","max_tokens":32,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`,
+			wantError: "top_k",
+		},
+		{
+			name:      "service_tier",
+			body:      `{"model":"nvidia/test","max_tokens":32,"service_tier":"auto","messages":[{"role":"user","content":"hi"}]}`,
+			wantError: "service_tier",
+		},
+		{
+			name:      "max_tokens_zero",
+			body:      `{"model":"nvidia/test","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`,
+			wantError: "max_tokens=0",
+		},
+		{
+			name:      "max_tokens_missing",
+			body:      `{"model":"nvidia/test","messages":[{"role":"user","content":"hi"}]}`,
+			wantError: "max_tokens is required",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls atomic.Int32
+			handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"chatcmpl-ignored","model":"nvidia/test","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+
+			response := serveMessages(handler, test.body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("upstream calls = %d, want 0", calls.Load())
+			}
+			if !strings.Contains(response.Body.String(), test.wantError) {
+				t.Fatalf("body = %s, want error containing %q", response.Body.String(), test.wantError)
+			}
+		})
 	}
 }
 
