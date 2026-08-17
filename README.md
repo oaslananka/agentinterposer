@@ -78,7 +78,7 @@ OpenAI Responses uses native passthrough through the same reliability core. The 
 
 ### Build from source
 
-Development currently targets Go `1.26.5`.
+Development currently targets Go `1.26.6`.
 
 ```bash
 git clone https://github.com/oaslananka/agentinterposer.git
