@@ -181,6 +181,103 @@ func TestHandlerPreservesUpstreamSSEErrorBeforeMessageStart(t *testing.T) {
 	}
 }
 
+func TestHandlerValidatesUpstreamSSEEventMetadata(t *testing.T) {
+	t.Parallel()
+
+	normalChunk := `{"id":"chatcmpl-event","model":"nvidia/test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":"stop"}]}`
+	errorChunk := `{"error":{"type":"overloaded_error","message":"Overloaded"}}`
+	tests := []struct {
+		name       string
+		stream     string
+		wantStatus int
+		wantEvents []string
+		wantBody   string
+	}{
+		{
+			name:       "data_only_default_message",
+			stream:     "data: " + normalChunk + "\n\ndata: [DONE]\n\n",
+			wantStatus: http.StatusOK,
+			wantEvents: []string{"message_start", "message_delta", "message_stop"},
+		},
+		{
+			name:       "explicit_message_event",
+			stream:     "event: message\ndata: " + normalChunk + "\n\nevent: message\ndata: [DONE]\n\n",
+			wantStatus: http.StatusOK,
+			wantEvents: []string{"message_start", "message_delta", "message_stop"},
+		},
+		{
+			name:       "explicit_error_event",
+			stream:     "event: error\ndata: " + errorChunk + "\n\n",
+			wantStatus: http.StatusOK,
+			wantEvents: []string{"error"},
+		},
+		{
+			name:       "error_event_with_normal_chunk",
+			stream:     "event: error\ndata: " + normalChunk + "\n\n",
+			wantStatus: http.StatusBadGateway,
+			wantBody:   "event metadata",
+		},
+		{
+			name:       "unknown_event_with_data",
+			stream:     "event: future_event\ndata: " + normalChunk + "\n\n",
+			wantStatus: http.StatusBadGateway,
+			wantBody:   "event metadata",
+		},
+		{
+			name: "comments_and_data_less_event_are_ignored",
+			stream: ": keep-alive\n\n" +
+				"event: future_event\n\n" +
+				"data: " + normalChunk + "\n\ndata: [DONE]\n\n",
+			wantStatus: http.StatusOK,
+			wantEvents: []string{"message_start", "message_delta", "message_stop"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, test.stream)
+			}))
+			response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if test.wantBody != "" {
+				if !strings.Contains(response.Body.String(), test.wantBody) {
+					t.Fatalf("body = %s, want %q", response.Body.String(), test.wantBody)
+				}
+				return
+			}
+			events := parseTestSSE(t, response.Body.String())
+			assertSSEEventTypes(t, events, test.wantEvents)
+		})
+	}
+}
+
+func TestHandlerStreamsErrorWhenUpstreamEventMetadataChangesAfterStart(t *testing.T) {
+	t.Parallel()
+
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w,
+			"data: {\"id\":\"chatcmpl-event-late\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"+
+				"event: future_event\ndata: {\"id\":\"chatcmpl-event-late\",\"model\":\"nvidia/test\",\"choices\":[]}\n\n")
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 once stream starts; body=%s", response.Code, response.Body.String())
+	}
+	events := parseTestSSE(t, response.Body.String())
+	if len(events) < 2 || events[len(events)-1].Event != "error" {
+		t.Fatalf("events = %#v, want terminal error event", events)
+	}
+	errObject := events[len(events)-1].Data["error"].(map[string]any)
+	if message, _ := errObject["message"].(string); !strings.Contains(message, "event metadata") {
+		t.Fatalf("stream error = %#v, want event metadata failure", errObject)
+	}
+}
+
 func TestHandlerStreamsAnthropicErrorWhenUpstreamSSEBecomesInvalid(t *testing.T) {
 	t.Parallel()
 
