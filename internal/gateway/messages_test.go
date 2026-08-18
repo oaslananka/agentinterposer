@@ -1012,6 +1012,59 @@ func TestTranslateAnthropicTextBlockAcceptsCitationMetadata(t *testing.T) {
 	}
 }
 
+func TestValidateAnthropicBeta(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		values  []string
+		wantErr bool
+	}{
+		{name: "absent"},
+		{name: "certified_set", values: []string{"claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,effort-2025-11-24"}},
+		{name: "certified_multiple_headers", values: []string{"claude-code-20250219", "effort-2025-11-24"}},
+		{name: "context_management", values: []string{"context-management-2025-06-27"}, wantErr: true},
+		{name: "prompt_caching_scope", values: []string{"prompt-caching-scope-2026-01-05"}, wantErr: true},
+		{name: "unknown_future", values: []string{"future-beta-2099-01-01"}, wantErr: true},
+		{name: "mixed_known_unknown", values: []string{"claude-code-20250219,context-management-2025-06-27"}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateAnthropicBeta(test.values)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateAnthropicBeta(%q) error = %v, wantErr %v", test.values, err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestHandlerRejectsUnsupportedAnthropicBetaBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	withUnsupportedBeta := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("anthropic-beta", "future-beta-2099-01-01")
+		handler.ServeHTTP(w, r)
+	})
+
+	response := serveMessages(withUnsupportedBeta, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+	if !strings.Contains(response.Body.String(), "anthropic-beta") {
+		t.Fatalf("body = %s, want anthropic-beta error", response.Body.String())
+	}
+}
+
 func TestHandlerRequiresSupportedAnthropicVersionBeforeUpstream(t *testing.T) {
 	t.Parallel()
 

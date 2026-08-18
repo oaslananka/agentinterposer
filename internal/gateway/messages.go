@@ -176,12 +176,38 @@ func validateAnthropicMessagesVersion(raw string) error {
 	return nil
 }
 
+func validateAnthropicBeta(values []string) error {
+	for _, value := range values {
+		for _, beta := range strings.Split(value, ",") {
+			beta = strings.TrimSpace(beta)
+			if beta == "" {
+				continue
+			}
+			switch beta {
+			case "claude-code-20250219",
+				"interleaved-thinking-2025-05-14",
+				"mid-conversation-system-2026-04-07",
+				"effort-2025-11-24":
+				continue
+			default:
+				return fmt.Errorf("unsupported anthropic-beta %q", beta)
+			}
+		}
+	}
+	return nil
+}
+
 func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if h.upstreamURL == "" {
 		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "upstream is not configured")
 		return
 	}
 	if err := validateAnthropicMessagesVersion(r.Header.Get("anthropic-version")); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	if err := validateAnthropicBeta(r.Header.Values("anthropic-beta")); err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
