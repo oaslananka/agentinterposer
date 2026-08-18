@@ -16,4 +16,4 @@ Please avoid including real provider API keys, access tokens, user prompts, or m
 
 AgentInterposer expects provider credentials through process environment variables. Repository files, examples, tests, logs, issues, and pull requests must never contain real secret values.
 
-The gateway deliberately replaces client-side `Authorization` credentials with its configured upstream bearer token instead of forwarding client credentials to the provider.
+The gateway never forwards client-side `Authorization` or `x-api-key` credentials to the provider; upstream authentication always uses the server-owned configured bearer token. AgentInterposer does not currently authenticate clients itself, so non-loopback deployments must provide the separate authentication and network-security boundary required by `AGENTINTERPOSER_ALLOW_REMOTE=true`.

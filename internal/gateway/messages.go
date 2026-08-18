@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -166,6 +167,25 @@ type chatCompletionResponse struct {
 	} `json:"usage"`
 }
 
+func validateAnthropicMessagesQuery(query url.Values) error {
+	if len(query) == 0 {
+		return nil
+	}
+	values, ok := query["beta"]
+	if len(query) != 1 || !ok || len(values) != 1 || values[0] != "true" {
+		return errors.New("unsupported Messages query parameters; only beta=true is tolerated for certified Claude Code compatibility")
+	}
+	return nil
+}
+
+func validateAnthropicMessagesContentType(raw string) error {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(raw))
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		return errors.New("Content-Type must be application/json")
+	}
+	return nil
+}
+
 func validateAnthropicMessagesVersion(raw string) error {
 	version := strings.TrimSpace(raw)
 	if version == "" {
@@ -215,6 +235,14 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	ensureAnthropicRequestID(w)
 	if h.upstreamURL == "" {
 		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "upstream is not configured")
+		return
+	}
+	if err := validateAnthropicMessagesQuery(r.URL.Query()); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if err := validateAnthropicMessagesContentType(r.Header.Get("Content-Type")); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	if err := validateAnthropicMessagesVersion(r.Header.Get("anthropic-version")); err != nil {
