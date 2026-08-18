@@ -1011,3 +1011,46 @@ func TestTranslateAnthropicTextBlockAcceptsCitationMetadata(t *testing.T) {
 		t.Fatalf("translated messages = %#v", messages)
 	}
 }
+
+func TestHandlerRequiresSupportedAnthropicVersionBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		version string
+	}{
+		{name: "missing"},
+		{name: "legacy", version: "2023-01-01"},
+		{name: "unknown_future", version: "2099-01-01"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"chatcmpl-unexpected","model":"nvidia/test","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
+			request.Header.Set("Content-Type", "application/json")
+			if test.version != "" {
+				request.Header.Set("anthropic-version", test.version)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("upstream calls = %d, want 0", calls.Load())
+			}
+			if !strings.Contains(response.Body.String(), "anthropic-version") {
+				t.Fatalf("body = %s, want anthropic-version error", response.Body.String())
+			}
+		})
+	}
+}

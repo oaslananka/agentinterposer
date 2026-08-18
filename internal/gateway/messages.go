@@ -14,6 +14,8 @@ import (
 	"github.com/oaslananka/agentinterposer/internal/compatibility"
 )
 
+const supportedAnthropicMessagesVersion = "2023-06-01"
+
 type anthropicMessagesRequest struct {
 	Model         string                  `json:"model"`
 	MaxTokens     *int                    `json:"max_tokens"`
@@ -163,9 +165,24 @@ type chatCompletionResponse struct {
 	} `json:"usage"`
 }
 
+func validateAnthropicMessagesVersion(raw string) error {
+	version := strings.TrimSpace(raw)
+	if version == "" {
+		return errors.New("anthropic-version header is required")
+	}
+	if version != supportedAnthropicMessagesVersion {
+		return fmt.Errorf("unsupported anthropic-version %q; expected %s", version, supportedAnthropicMessagesVersion)
+	}
+	return nil
+}
+
 func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if h.upstreamURL == "" {
 		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "upstream is not configured")
+		return
+	}
+	if err := validateAnthropicMessagesVersion(r.Header.Get("anthropic-version")); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 
