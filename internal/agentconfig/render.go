@@ -85,7 +85,7 @@ func RenderClaudeCodeEnv(model, gatewayURL string) (string, error) {
 		return "", err
 	}
 
-	return fmt.Sprintf("export ANTHROPIC_BASE_URL=%s\nexport ANTHROPIC_AUTH_TOKEN=%s\nexport ANTHROPIC_MODEL=%s\n",
+	return fmt.Sprintf("export ANTHROPIC_BASE_URL=%s\nexport ANTHROPIC_AUTH_TOKEN=%s\nexport ANTHROPIC_MODEL=%s\nexport CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS='1'\n",
 		quoteShell(baseURL), quoteShell(localClientPlaceholder), quoteShell(model)), nil
 }
 
