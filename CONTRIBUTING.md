@@ -28,6 +28,17 @@ go build ./cmd/agentinterposer
 
 Then verify that `git diff --check` is clean.
 
+## Protocol fuzzing
+
+When changing Messages decoding, SSE parsing, streaming tool-call handling, or capability fallback routing, run the focused Go fuzz targets individually so failures produce a reproducible corpus entry:
+
+```bash
+go test ./internal/gateway -run '^$' -fuzz '^FuzzDecodeAnthropicMessagesRequest$' -fuzztime=20s
+go test ./internal/gateway -run '^$' -fuzz '^FuzzReadSSEFrame$' -fuzztime=20s
+go test ./internal/gateway -run '^$' -fuzz '^FuzzAnthropicMessagesStream$' -fuzztime=20s
+go test ./internal/gateway -run '^$' -fuzz '^FuzzFallbackRoutingPreservesNonModelSemantics$' -fuzztime=20s
+```
+
 ## Change guidelines
 
 - Keep pull requests small and single-purpose.

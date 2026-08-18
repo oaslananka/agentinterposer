@@ -1103,3 +1103,48 @@ func TestHandlerPreservesCodexFunctionCallStreamingEvents(t *testing.T) {
 		t.Fatalf("Codex function-call stream changed in transit\ngot:  %q\nwant: %q", got, events)
 	}
 }
+
+func TestFallbackRoutingRequiresExactProtocolFieldNames(t *testing.T) {
+	t.Parallel()
+
+	h := &handler{fallbackModels: []string{
+		"nvidia/nemotron-3-super-120b-a12b",
+		"meta/llama-3.2-11b-vision-instruct",
+	}}
+
+	tests := []struct {
+		name  string
+		body  string
+		route func([]byte) []byte
+	}{
+		{
+			name:  "chat top-level model",
+			body:  `{"modEl":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"user","content":[{"type":"image_url"}]}]}`,
+			route: h.routeChatCompletionBody,
+		},
+		{
+			name:  "chat nested fields",
+			body:  `{"model":"nvidia/nemotron-3-super-120b-a12b","messAges":[{"role":"user","Content":[{"tYpe":"image_url"}]}]}`,
+			route: h.routeChatCompletionBody,
+		},
+		{
+			name:  "responses top-level input",
+			body:  `{"model":"meta/llama-3.2-11b-vision-instruct","Input":"hello"}`,
+			route: h.routeResponsesBody,
+		},
+		{
+			name:  "responses nested fields",
+			body:  `{"model":"meta/llama-3.2-11b-vision-instruct","input":[{"Role":"user","content":[{"Type":"input_text","text":"hello"}]}]}`,
+			route: h.routeResponsesBody,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := test.route([]byte(test.body))
+			if string(got) != test.body {
+				t.Fatalf("routing changed case-mismatched protocol JSON:\n got: %s\nwant: %s", got, test.body)
+			}
+		})
+	}
+}
