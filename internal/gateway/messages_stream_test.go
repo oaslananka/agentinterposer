@@ -192,6 +192,7 @@ func TestHandlerFlushesAnthropicTextDeltaBeforeUpstreamCompletes(t *testing.T) {
 		t.Fatalf("create request: %v", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("anthropic-version", supportedAnthropicMessagesVersion)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("streaming request: %v", err)
