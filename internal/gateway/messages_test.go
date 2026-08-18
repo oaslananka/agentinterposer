@@ -770,6 +770,96 @@ func TestHandlerTranslatesUpstreamRateLimitToAnthropicError(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsKnownOversizedMessagesUpstreamResponse(t *testing.T) {
+	const limit = 32 << 20
+
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "33554433")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"short"}`))
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "upstream response body too large") {
+		t.Fatalf("body = %s, want response-size error above %d bytes", response.Body.String(), limit)
+	}
+}
+
+func TestHandlerAcceptsMessagesUpstreamResponseAtExactLimit(t *testing.T) {
+	const limit = 32 << 20
+	payload := `{"id":"chatcmpl-limit","model":"nvidia/test","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	if len(payload) > limit {
+		t.Fatalf("fixture payload len=%d exceeds limit", len(payload))
+	}
+	payload += strings.Repeat(" ", limit-len(payload))
+
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "33554432")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(payload))
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"id":"chatcmpl-limit"`) {
+		t.Fatalf("body missing translated response id: %s", response.Body.String())
+	}
+}
+
+func TestHandlerRejectsUnknownLengthOversizedMessagesUpstreamError(t *testing.T) {
+	const limit = 32 << 20
+
+	handler := newMessagesTestHandlerWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "11")
+		w.WriteHeader(http.StatusTooManyRequests)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream test server does not support flushing")
+		}
+		_, _ = w.Write([]byte(`{"error":{"message":"`))
+		flusher.Flush()
+		_, _ = w.Write([]byte(strings.Repeat("x", limit)))
+		_, _ = w.Write([]byte(`"}}`))
+	}), Config{
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRetries:          0,
+		MaxRequestBytes:     1 << 20,
+	})
+
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body_len=%d", response.Code, response.Body.Len())
+	}
+	if got := response.Header().Get("Retry-After"); got != "11" {
+		t.Fatalf("Retry-After = %q, want 11", got)
+	}
+	var envelope struct {
+		RequestID string `json:"request_id"`
+		Error     struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if envelope.RequestID == "" || envelope.RequestID != response.Header().Get("request-id") {
+		t.Fatalf("request-id mismatch body=%q header=%q", envelope.RequestID, response.Header().Get("request-id"))
+	}
+	if envelope.Error.Type != "api_error" || envelope.Error.Message != "upstream response body too large" {
+		t.Fatalf("error = %#v, want api_error response-size failure", envelope.Error)
+	}
+}
+
 func newMessagesTestHandler(t *testing.T, upstreamHandler http.Handler) http.Handler {
 	t.Helper()
 	return newMessagesTestHandlerWithConfig(t, upstreamHandler, Config{

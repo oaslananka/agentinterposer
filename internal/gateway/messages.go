@@ -18,6 +18,10 @@ import (
 
 const supportedAnthropicMessagesVersion = "2023-06-01"
 
+const maxAnthropicUpstreamResponseBytes int64 = 32 << 20
+
+var errAnthropicUpstreamResponseTooLarge = errors.New("upstream response body too large")
+
 type anthropicMessagesRequest struct {
 	Model         string                  `json:"model"`
 	MaxTokens     *int                    `json:"max_tokens"`
@@ -320,8 +324,12 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamBody, err := io.ReadAll(upstreamResponse.Body)
+	upstreamBody, err := readAnthropicUpstreamResponse(upstreamResponse, maxAnthropicUpstreamResponseBytes)
 	if err != nil {
+		if errors.Is(err, errAnthropicUpstreamResponseTooLarge) {
+			writeAnthropicError(w, http.StatusBadGateway, "api_error", errAnthropicUpstreamResponseTooLarge.Error())
+			return
+		}
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "unable to read upstream response")
 		return
 	}
@@ -341,6 +349,20 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, anthropicResponse)
+}
+
+func readAnthropicUpstreamResponse(response *http.Response, maxBytes int64) ([]byte, error) {
+	if response.ContentLength > maxBytes {
+		return nil, errAnthropicUpstreamResponseTooLarge
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, errAnthropicUpstreamResponseTooLarge
+	}
+	return body, nil
 }
 
 func (h *handler) selectMessagesModel(request chatCompletionRequest) string {
