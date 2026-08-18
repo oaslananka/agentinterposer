@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oaslananka/agentinterposer/internal/config"
 )
@@ -269,4 +271,78 @@ func TestRunMetaCommandIgnoresServerArguments(t *testing.T) {
 	if handled || exitCode != 0 {
 		t.Fatalf("runMetaCommand(nil) = handled:%v exit:%d, want not handled", handled, exitCode)
 	}
+}
+
+func TestNewHandlerWiresUpstreamTimeouts(t *testing.T) {
+	t.Run("response headers", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		defer upstream.Close()
+
+		handler, err := newHandler(config.Config{
+			UpstreamURL:                   upstream.URL,
+			UpstreamBearerToken:           "test-token",
+			MaxConcurrent:                 1,
+			MaxRetries:                    0,
+			MaxRequestBytes:               1 << 20,
+			UpstreamResponseHeaderTimeout: 20 * time.Millisecond,
+			UpstreamBodyIdleTimeout:       time.Second,
+		})
+		if err != nil {
+			t.Fatalf("newHandler() error = %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Millisecond)
+		defer cancel()
+		request := httptest.NewRequest(http.MethodGet, "/v1/models", nil).WithContext(ctx)
+		response := httptest.NewRecorder()
+		started := time.Now()
+		handler.ServeHTTP(response, request)
+		if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+			t.Fatalf("response-header timeout took %s, want configured timeout well before downstream deadline", elapsed)
+		}
+		if response.Code != http.StatusGatewayTimeout {
+			t.Fatalf("status = %d, want 504", response.Code)
+		}
+	})
+
+	t.Run("body idle", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"partial"`))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}))
+		defer upstream.Close()
+
+		handler, err := newHandler(config.Config{
+			UpstreamURL:                   upstream.URL,
+			UpstreamBearerToken:           "test-token",
+			MaxConcurrent:                 1,
+			MaxRetries:                    0,
+			MaxRequestBytes:               1 << 20,
+			UpstreamResponseHeaderTimeout: time.Second,
+			UpstreamBodyIdleTimeout:       20 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("newHandler() error = %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Millisecond)
+		defer cancel()
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("anthropic-version", "2023-06-01")
+		response := httptest.NewRecorder()
+		started := time.Now()
+		handler.ServeHTTP(response, request)
+		if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+			t.Fatalf("body-idle timeout took %s, want configured timeout well before downstream deadline", elapsed)
+		}
+		if response.Code != http.StatusGatewayTimeout {
+			t.Fatalf("status = %d, want 504; body=%s", response.Code, response.Body.String())
+		}
+	})
 }

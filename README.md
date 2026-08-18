@@ -13,7 +13,7 @@ Coding agents often expect different API protocols and subtly different streamin
 The project is designed around three principles:
 
 - **Agent-aware compatibility:** preserve the behavior coding agents depend on, not just JSON shape.
-- **Provider-aware reliability:** bound concurrency and handle retryable provider capacity failures without retry storms.
+- **Provider-aware reliability:** bound concurrency, bound upstream header/body idle waits, and handle retryable provider capacity failures without retry storms.
 - **Local-first BYOK:** credentials stay in the local process environment and are never stored in the repository.
 
 ## Current capabilities
@@ -235,6 +235,8 @@ For a non-default gateway location, pass the root URL as the fourth argument, fo
 | `AGENTINTERPOSER_MAX_CONCURRENT` | `3` | Maximum simultaneous upstream requests |
 | `AGENTINTERPOSER_MAX_RETRIES` | `3` | Retries after the initial request |
 | `AGENTINTERPOSER_RETRY_BASE_DELAY` | `500ms` | Base duration for exponential backoff |
+| `AGENTINTERPOSER_UPSTREAM_RESPONSE_HEADER_TIMEOUT` | `2m` | Maximum wait for upstream response headers after the request is sent |
+| `AGENTINTERPOSER_UPSTREAM_BODY_IDLE_TIMEOUT` | `2m` | Maximum interval without upstream response-body progress; active streams reset this deadline on every read |
 | `AGENTINTERPOSER_MAX_REQUEST_BYTES` | `33554432` | Maximum request body size in bytes |
 | `AGENTINTERPOSER_FALLBACK_MODELS` | none | Ordered comma-separated fallback model IDs selected only from positive capability evidence |
 | `AGENTINTERPOSER_MODEL_ROUTES` | none | JSON array mapping exact model IDs to dedicated upstream URLs and bearer-token environment variable names |
