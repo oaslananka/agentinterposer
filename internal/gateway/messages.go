@@ -49,13 +49,20 @@ type anthropicContentBlock struct {
 	Type         string                 `json:"type"`
 	CacheControl *anthropicCacheControl `json:"cache_control"`
 	Text         string                 `json:"text"`
+	Citations    json.RawMessage        `json:"citations"`
 	Source       *anthropicImageSource  `json:"source"`
 	ID           string                 `json:"id"`
 	Name         string                 `json:"name"`
 	Input        json.RawMessage        `json:"input"`
+	Caller       *anthropicToolCaller   `json:"caller"`
 	ToolUseID    string                 `json:"tool_use_id"`
 	Content      json.RawMessage        `json:"content"`
 	IsError      bool                   `json:"is_error"`
+}
+
+type anthropicToolCaller struct {
+	Type   string `json:"type"`
+	ToolID string `json:"tool_id"`
 }
 
 type anthropicImageSource struct {
@@ -63,6 +70,7 @@ type anthropicImageSource struct {
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
 	URL       string `json:"url"`
+	FileID    string `json:"file_id"`
 }
 
 type anthropicTool struct {
@@ -450,9 +458,9 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 		return []chatMessage{{Role: message.Role, Content: text}}, toolNames, nil
 	}
 
-	var blocks []anthropicContentBlock
-	if err := json.Unmarshal(message.Content, &blocks); err != nil {
-		return nil, nil, fmt.Errorf("invalid %s message content", message.Role)
+	blocks, err := decodeAnthropicContentBlocks(message.Content)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid %s message content: %w", message.Role, err)
 	}
 
 	if message.Role == "assistant" {
@@ -468,6 +476,14 @@ func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, ma
 			case "tool_use":
 				if block.ID == "" || block.Name == "" {
 					return nil, nil, errors.New("tool_use requires id and name")
+				}
+				if block.Caller != nil {
+					if block.Caller.Type != "direct" {
+						return nil, nil, fmt.Errorf("tool_use %q has unsupported caller %q; server-tool callers are not supported", block.ID, block.Caller.Type)
+					}
+					if block.Caller.ToolID != "" {
+						return nil, nil, fmt.Errorf("tool_use %q direct caller must not include tool_id", block.ID)
+					}
 				}
 				arguments, err := compactJSONObject(block.Input)
 				if err != nil {
@@ -655,9 +671,9 @@ func decodeTextContent(raw json.RawMessage, field string) (string, error) {
 	} else if ok {
 		return text, nil
 	}
-	var blocks []anthropicContentBlock
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", fmt.Errorf("invalid %s content", field)
+	blocks, err := decodeAnthropicContentBlocks(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s content: %w", field, err)
 	}
 	var text strings.Builder
 	for _, block := range blocks {
@@ -697,6 +713,19 @@ func validateAnthropicCacheControl(cacheControl *anthropicCacheControl) error {
 	default:
 		return fmt.Errorf("ttl %q is not supported; expected 5m or 1h", cacheControl.TTL)
 	}
+}
+
+func decodeAnthropicContentBlocks(raw json.RawMessage) ([]anthropicContentBlock, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var blocks []anthropicContentBlock
+	if err := decoder.Decode(&blocks); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing JSON value")
+	}
+	return blocks, nil
 }
 
 func decodeJSONString(raw json.RawMessage) (string, bool, error) {
