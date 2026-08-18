@@ -43,6 +43,91 @@ func (w *failingSSEWriter) Write(p []byte) (int, error) {
 
 func (w *failingSSEWriter) Flush() {}
 
+func TestReadSSEFrameRejectsOversizedUnterminatedLine(t *testing.T) {
+	t.Parallel()
+
+	const limit = 64
+	input := "data: " + strings.Repeat("x", limit) // Prefix pushes the raw frame over the limit; no terminating newline.
+	frame, err := readSSEFrame(bufio.NewReader(strings.NewReader(input)), limit)
+	if err == nil || !strings.Contains(err.Error(), "64 bytes") {
+		t.Fatalf("readSSEFrame() data len=%d error=%v, want 64-byte resource-limit error", len(frame.data), err)
+	}
+}
+
+func TestReadSSEFrameRejectsOversizedAccumulatedFrame(t *testing.T) {
+	t.Parallel()
+
+	const limit = 64
+	input := "data: " + strings.Repeat("a", 28) + "\n" +
+		"data: " + strings.Repeat("b", 28) + "\n\n"
+	frame, err := readSSEFrame(bufio.NewReader(strings.NewReader(input)), limit)
+	if err == nil || !strings.Contains(err.Error(), "64 bytes") {
+		t.Fatalf("readSSEFrame() data len=%d error=%v, want 64-byte resource-limit error", len(frame.data), err)
+	}
+}
+
+func TestReadSSEFrameResetsLimitAcrossDataLessFrames(t *testing.T) {
+	t.Parallel()
+
+	const limit = 64
+	input := "id: " + strings.Repeat("a", 45) + "\n\n" +
+		"data: {\"id\":\"chatcmpl-reset\"}\n\n"
+	frame, err := readSSEFrame(bufio.NewReader(strings.NewReader(input)), limit)
+	if err != nil {
+		t.Fatalf("readSSEFrame() error = %v", err)
+	}
+	if frame.data != `{"id":"chatcmpl-reset"}` {
+		t.Fatalf("frame = %#v", frame)
+	}
+}
+
+func TestReadSSEFrameIgnoresIDAndRetryMetadata(t *testing.T) {
+	t.Parallel()
+
+	input := "id: upstream-42\nretry: 1000\ndata: {\"id\":\"chatcmpl-meta\"}\n\n"
+	frame, err := readSSEFrame(bufio.NewReader(strings.NewReader(input)), 128)
+	if err != nil {
+		t.Fatalf("readSSEFrame() error = %v", err)
+	}
+	if frame.event != "" || frame.data != `{"id":"chatcmpl-meta"}` {
+		t.Fatalf("frame = %#v", frame)
+	}
+}
+
+func TestMessagesStreamReportsOversizedFrameBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	response := httptest.NewRecorder()
+	body := "data: " + strings.Repeat("x", 128) + "\n\n"
+	streamAnthropicMessagesWithFrameLimit(response, strings.NewReader(body), "nvidia/test", 64)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "64 bytes") {
+		t.Fatalf("body = %s, want resource-limit error", response.Body.String())
+	}
+}
+
+func TestMessagesStreamReportsOversizedFrameAfterStart(t *testing.T) {
+	t.Parallel()
+
+	response := httptest.NewRecorder()
+	first := `data: {"id":"c","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}` + "\n\n"
+	oversized := "data: " + strings.Repeat("x", 256) + "\n\n"
+	streamAnthropicMessagesWithFrameLimit(response, strings.NewReader(first+oversized), "m", 160)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 once stream starts; body=%s", response.Code, response.Body.String())
+	}
+	events := parseTestSSE(t, response.Body.String())
+	if len(events) == 0 || events[len(events)-1].Event != "error" {
+		t.Fatalf("events = %#v, want terminal error event", events)
+	}
+	errObject := events[len(events)-1].Data["error"].(map[string]any)
+	if message, _ := errObject["message"].(string); !strings.Contains(message, "160 bytes") {
+		t.Fatalf("stream error = %#v, want resource-limit error", errObject)
+	}
+}
+
 func TestHandlerStreamsAnthropicTextEvents(t *testing.T) {
 	t.Parallel()
 

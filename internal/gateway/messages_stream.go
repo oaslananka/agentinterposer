@@ -83,7 +83,15 @@ type upstreamSSEFrame struct {
 	data  string
 }
 
+const maxUpstreamSSEFrameBytes = 32 << 20
+
+var errUpstreamSSEFrameTooLarge = errors.New("upstream SSE frame exceeded resource limit")
+
 func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedModel string) {
+	streamAnthropicMessagesWithFrameLimit(w, body, requestedModel, maxUpstreamSSEFrameBytes)
+}
+
+func streamAnthropicMessagesWithFrameLimit(w http.ResponseWriter, body io.Reader, requestedModel string, frameLimit int) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "streaming is not supported by this HTTP server")
@@ -96,9 +104,13 @@ func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedMod
 	}
 	reader := bufio.NewReader(body)
 	for {
-		frame, err := readSSEFrame(reader)
+		frame, err := readSSEFrame(reader, frameLimit)
 		if err != nil && !errors.Is(err, io.EOF) {
-			state.fail(w, flusher, "unable to read upstream stream")
+			message := "unable to read upstream stream"
+			if errors.Is(err, errUpstreamSSEFrameTooLarge) {
+				message = err.Error()
+			}
+			state.fail(w, flusher, message)
 			return
 		}
 		if frame.data != "" {
@@ -384,37 +396,80 @@ func (s *messagesStreamState) failStream(w http.ResponseWriter, flusher http.Flu
 	})
 }
 
-func readSSEFrame(reader *bufio.Reader) (upstreamSSEFrame, error) {
+func readSSEFrame(reader *bufio.Reader, maxBytes int) (upstreamSSEFrame, error) {
 	var event string
-	var data []string
+	var data strings.Builder
+	dataLines := 0
+	frameBytes := 0
 	for {
-		line, err := reader.ReadString('\n')
+		line, consumed, err := readSSELine(reader, maxBytes-frameBytes)
+		frameBytes += consumed
+		if errors.Is(err, errUpstreamSSEFrameTooLarge) {
+			return upstreamSSEFrame{}, upstreamSSEFrameLimitError(maxBytes)
+		}
 		if len(line) > 0 {
 			line = strings.TrimSuffix(line, "\n")
 			line = strings.TrimSuffix(line, "\r")
 			switch {
 			case line == "":
-				if len(data) > 0 {
-					return upstreamSSEFrame{event: event, data: strings.Join(data, "\n")}, err
+				if dataLines > 0 {
+					return upstreamSSEFrame{event: event, data: data.String()}, err
 				}
 				event = ""
+				data.Reset()
+				dataLines = 0
+				frameBytes = 0
 			case strings.HasPrefix(line, ":"):
 				// SSE comments are keep-alive metadata and carry no event semantics.
 			case strings.HasPrefix(line, "event:"):
 				value := strings.TrimPrefix(line, "event:")
 				event = strings.TrimPrefix(value, " ")
+			case strings.HasPrefix(line, "id:"), strings.HasPrefix(line, "retry:"):
+				// Reconnection metadata is irrelevant to this one-shot upstream response.
 			case strings.HasPrefix(line, "data:"):
 				value := strings.TrimPrefix(line, "data:")
-				data = append(data, strings.TrimPrefix(value, " "))
+				if dataLines > 0 {
+					data.WriteByte('\n')
+				}
+				data.WriteString(strings.TrimPrefix(value, " "))
+				dataLines++
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) && len(data) > 0 {
-				return upstreamSSEFrame{event: event, data: strings.Join(data, "\n")}, io.EOF
+			if errors.Is(err, io.EOF) && dataLines > 0 {
+				return upstreamSSEFrame{event: event, data: data.String()}, io.EOF
 			}
 			return upstreamSSEFrame{}, err
 		}
 	}
+}
+
+func readSSELine(reader *bufio.Reader, remaining int) (string, int, error) {
+	if remaining <= 0 {
+		return "", 0, errUpstreamSSEFrameTooLarge
+	}
+	var line strings.Builder
+	consumed := 0
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > 0 {
+			if len(fragment) > remaining-consumed {
+				return "", consumed, errUpstreamSSEFrameTooLarge
+			}
+			_, _ = line.Write(fragment)
+			consumed += len(fragment)
+		}
+		if err == nil || !errors.Is(err, bufio.ErrBufferFull) {
+			return line.String(), consumed, err
+		}
+	}
+}
+
+func upstreamSSEFrameLimitError(limit int) error {
+	if limit == maxUpstreamSSEFrameBytes {
+		return fmt.Errorf("%w: 32 MiB", errUpstreamSSEFrameTooLarge)
+	}
+	return fmt.Errorf("%w: %d bytes", errUpstreamSSEFrameTooLarge, limit)
 }
 
 func writeAnthropicSSE(w http.ResponseWriter, flusher http.Flusher, event string, payload any) error {
