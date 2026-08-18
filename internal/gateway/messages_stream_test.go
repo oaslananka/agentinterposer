@@ -18,6 +18,31 @@ type testSSEEvent struct {
 	Data  map[string]any
 }
 
+type failingSSEWriter struct {
+	header        http.Header
+	failAt        int
+	writeAttempts int
+}
+
+func (w *failingSSEWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingSSEWriter) WriteHeader(int) {}
+
+func (w *failingSSEWriter) Write(p []byte) (int, error) {
+	w.writeAttempts++
+	if w.writeAttempts == w.failAt {
+		return 0, io.ErrClosedPipe
+	}
+	return len(p), nil
+}
+
+func (w *failingSSEWriter) Flush() {}
+
 func TestHandlerStreamsAnthropicTextEvents(t *testing.T) {
 	t.Parallel()
 
@@ -176,6 +201,94 @@ func TestHandlerStreamsAnthropicErrorWhenUpstreamSSEBecomesInvalid(t *testing.T)
 	errObject := events[1].Data["error"].(map[string]any)
 	if errObject["type"] != "api_error" {
 		t.Fatalf("stream error = %#v", errObject)
+	}
+}
+
+func TestMessagesStreamStopsWritingAfterDownstreamWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		failAt     int
+		body       string
+		wantWrites int
+	}{
+		{
+			name:       "message_start",
+			failAt:     1,
+			body:       "data: {\"id\":\"chatcmpl-write-fail\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+			wantWrites: 1,
+		},
+		{
+			name:   "message_delta",
+			failAt: 2,
+			body: "data: {\"id\":\"chatcmpl-write-fail\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n" +
+				"data: {\"id\":\"chatcmpl-write-fail\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n",
+			wantWrites: 2,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &failingSSEWriter{failAt: test.failAt}
+			streamAnthropicMessages(writer, strings.NewReader(test.body), "nvidia/test")
+			if writer.writeAttempts != test.wantWrites {
+				t.Fatalf("downstream write attempts = %d, want %d", writer.writeAttempts, test.wantWrites)
+			}
+		})
+	}
+}
+
+func TestHandlerCancelsUpstreamMessagesStreamWhenClientCancels(t *testing.T) {
+	t.Parallel()
+
+	upstreamCancelled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-cancel\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"first\"},\"finish_reason\":null}]}\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+		close(upstreamCancelled)
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{UpstreamURL: upstream.URL, UpstreamBearerToken: "server-secret", MaxConcurrent: 1, MaxRequestBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	gateway := httptest.NewServer(handler)
+	defer gateway.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, gateway.URL+"/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("anthropic-version", supportedAnthropicMessagesVersion)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("streaming request: %v", err)
+	}
+
+	reader := bufio.NewReader(response.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read first streamed delta: %v", err)
+		}
+		if strings.Contains(line, `"type":"text_delta"`) {
+			break
+		}
+	}
+	cancel()
+	_ = response.Body.Close()
+
+	select {
+	case <-upstreamCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream request context was not cancelled after downstream client cancellation")
 	}
 }
 
