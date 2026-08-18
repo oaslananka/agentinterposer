@@ -134,6 +134,28 @@ func TestHandlerStreamsBufferedAnthropicToolUse(t *testing.T) {
 	}
 }
 
+func TestHandlerPreservesUpstreamSSEErrorBeforeMessageStart(t *testing.T) {
+	t.Parallel()
+
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")
+	}))
+
+	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 streaming error; body=%s", response.Code, response.Body.String())
+	}
+	events := parseTestSSE(t, response.Body.String())
+	if len(events) != 1 || events[0].Event != "error" {
+		t.Fatalf("events = %#v, want one error event", events)
+	}
+	errObject := events[0].Data["error"].(map[string]any)
+	if errObject["type"] != "api_error" || errObject["message"] != "Overloaded" {
+		t.Fatalf("stream error = %#v", errObject)
+	}
+}
+
 func TestHandlerStreamsAnthropicErrorWhenUpstreamSSEBecomesInvalid(t *testing.T) {
 	t.Parallel()
 

@@ -96,7 +96,7 @@ func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedMod
 				if message == "" {
 					message = "upstream stream returned an error"
 				}
-				state.fail(w, flusher, message)
+				state.failStream(w, flusher, message)
 				return
 			}
 			if err := state.consume(w, flusher, chunk); err != nil {
@@ -324,6 +324,10 @@ func (s *messagesStreamState) fail(w http.ResponseWriter, flusher http.Flusher, 
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", message)
 		return
 	}
+	s.failStream(w, flusher, message)
+}
+
+func (s *messagesStreamState) failStream(w http.ResponseWriter, flusher http.Flusher, message string) {
 	_ = writeAnthropicSSE(w, flusher, "error", map[string]any{
 		"type": "error",
 		"error": map[string]string{
