@@ -923,3 +923,91 @@ func serveMessages(handler http.Handler, body string) *httptest.ResponseRecorder
 	handler.ServeHTTP(response, request)
 	return response
 }
+
+func TestHandlerRejectsUnknownAnthropicContentBlockFieldsBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "user_content",
+			body: `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":[{"type":"text","text":"hi","future_semantics":{"mode":"strict"}}]}]}`,
+		},
+		{
+			name: "system_content",
+			body: `{"model":"nvidia/test","max_tokens":32,"system":[{"type":"text","text":"system","future_semantics":true}],"messages":[{"role":"user","content":"hi"}]}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"chatcmpl-unexpected","model":"nvidia/test","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+
+			response := serveMessages(handler, test.body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("upstream calls = %d, want 0", calls.Load())
+			}
+			if !strings.Contains(response.Body.String(), "future_semantics") {
+				t.Fatalf("body = %s, want unknown nested field error", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestTranslateAnthropicAssistantToolUseCallerSemantics(t *testing.T) {
+	t.Parallel()
+
+	t.Run("direct caller", func(t *testing.T) {
+		t.Parallel()
+		messages, _, err := translateAnthropicMessage(anthropicInputMessage{
+			Role:    "assistant",
+			Content: json.RawMessage(`[{"type":"tool_use","id":"call_direct","name":"probe","input":{},"caller":{"type":"direct"}}]`),
+		})
+		if err != nil {
+			t.Fatalf("translateAnthropicMessage() error = %v", err)
+		}
+		if len(messages) != 1 || len(messages[0].ToolCalls) != 1 || messages[0].ToolCalls[0].ID != "call_direct" {
+			t.Fatalf("translated messages = %#v, want direct tool call", messages)
+		}
+	})
+
+	t.Run("server caller", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := translateAnthropicMessage(anthropicInputMessage{
+			Role:    "assistant",
+			Content: json.RawMessage(`[{"type":"tool_use","id":"call_server","name":"probe","input":{},"caller":{"type":"code_execution_20260120","tool_id":"srv_123"}}]`),
+		})
+		if err == nil {
+			t.Fatal("translateAnthropicMessage() accepted a server-tool caller")
+		}
+		if !strings.Contains(err.Error(), "caller") {
+			t.Fatalf("error = %q, want caller error", err)
+		}
+	})
+}
+
+func TestTranslateAnthropicTextBlockAcceptsCitationMetadata(t *testing.T) {
+	t.Parallel()
+
+	messages, _, err := translateAnthropicMessage(anthropicInputMessage{
+		Role:    "assistant",
+		Content: json.RawMessage(`[{"type":"text","text":"cited answer","citations":[]}]`),
+	})
+	if err != nil {
+		t.Fatalf("translateAnthropicMessage() error = %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != "cited answer" {
+		t.Fatalf("translated messages = %#v", messages)
+	}
+}
