@@ -78,6 +78,11 @@ type messagesStreamState struct {
 	outputTokens int
 }
 
+type upstreamSSEFrame struct {
+	event string
+	data  string
+}
+
 func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedModel string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -91,13 +96,25 @@ func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedMod
 	}
 	reader := bufio.NewReader(body)
 	for {
-		data, err := readSSEData(reader)
+		frame, err := readSSEFrame(reader)
 		if err != nil && !errors.Is(err, io.EOF) {
 			state.fail(w, flusher, "unable to read upstream stream")
 			return
 		}
-		if data != "" {
-			if strings.TrimSpace(data) == "[DONE]" {
+		if frame.data != "" {
+			eventName := frame.event
+			if eventName == "" {
+				eventName = "message"
+			}
+			if eventName != "message" && eventName != "error" {
+				state.fail(w, flusher, fmt.Sprintf("upstream stream contained unsupported event metadata %q", eventName))
+				return
+			}
+			if strings.TrimSpace(frame.data) == "[DONE]" {
+				if eventName != "message" {
+					state.fail(w, flusher, "upstream stream contained incompatible event metadata for [DONE]")
+					return
+				}
 				if err := state.finish(w, flusher); err != nil {
 					if isDownstreamWriteError(err) {
 						return
@@ -107,8 +124,12 @@ func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedMod
 				return
 			}
 			var chunk chatCompletionStreamChunk
-			if decodeErr := json.Unmarshal([]byte(data), &chunk); decodeErr != nil {
+			if decodeErr := json.Unmarshal([]byte(frame.data), &chunk); decodeErr != nil {
 				state.fail(w, flusher, "upstream stream contained invalid JSON")
+				return
+			}
+			if eventName == "error" && chunk.Error == nil {
+				state.fail(w, flusher, "upstream stream contained incompatible event metadata for a non-error chunk")
 				return
 			}
 			if chunk.Error != nil {
@@ -363,28 +384,35 @@ func (s *messagesStreamState) failStream(w http.ResponseWriter, flusher http.Flu
 	})
 }
 
-func readSSEData(reader *bufio.Reader) (string, error) {
+func readSSEFrame(reader *bufio.Reader) (upstreamSSEFrame, error) {
+	var event string
 	var data []string
 	for {
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 {
 			line = strings.TrimSuffix(line, "\n")
 			line = strings.TrimSuffix(line, "\r")
-			if line == "" {
+			switch {
+			case line == "":
 				if len(data) > 0 {
-					return strings.Join(data, "\n"), err
+					return upstreamSSEFrame{event: event, data: strings.Join(data, "\n")}, err
 				}
-			} else if strings.HasPrefix(line, "data:") {
+				event = ""
+			case strings.HasPrefix(line, ":"):
+				// SSE comments are keep-alive metadata and carry no event semantics.
+			case strings.HasPrefix(line, "event:"):
+				value := strings.TrimPrefix(line, "event:")
+				event = strings.TrimPrefix(value, " ")
+			case strings.HasPrefix(line, "data:"):
 				value := strings.TrimPrefix(line, "data:")
-				value = strings.TrimPrefix(value, " ")
-				data = append(data, value)
+				data = append(data, strings.TrimPrefix(value, " "))
 			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) && len(data) > 0 {
-				return strings.Join(data, "\n"), io.EOF
+				return upstreamSSEFrame{event: event, data: strings.Join(data, "\n")}, io.EOF
 			}
-			return "", err
+			return upstreamSSEFrame{}, err
 		}
 	}
 }
