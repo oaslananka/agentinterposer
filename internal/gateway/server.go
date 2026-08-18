@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,9 +17,14 @@ import (
 )
 
 const (
-	defaultMaxRequestBytes int64 = 32 << 20
-	contentTypeHeader            = "Content-Type"
+	defaultMaxRequestBytes               int64 = 32 << 20
+	defaultUpstreamResponseHeaderTimeout       = 2 * time.Minute
+	defaultUpstreamBodyIdleTimeout             = 2 * time.Minute
+	maxRetryDrainBytes                   int64 = 64 << 10
+	contentTypeHeader                          = "Content-Type"
 )
+
+var errUpstreamResponseBodyIdleTimeout = errors.New("upstream response body idle timeout")
 
 type ModelRoute struct {
 	Model               string
@@ -26,14 +33,16 @@ type ModelRoute struct {
 }
 
 type Config struct {
-	UpstreamURL         string
-	UpstreamBearerToken string
-	MaxConcurrent       int
-	MaxRetries          int
-	RetryBaseDelay      time.Duration
-	MaxRequestBytes     int64
-	FallbackModels      []string
-	ModelRoutes         []ModelRoute
+	UpstreamURL                   string
+	UpstreamBearerToken           string
+	MaxConcurrent                 int
+	MaxRetries                    int
+	RetryBaseDelay                time.Duration
+	MaxRequestBytes               int64
+	UpstreamResponseHeaderTimeout time.Duration
+	UpstreamBodyIdleTimeout       time.Duration
+	FallbackModels                []string
+	ModelRoutes                   []ModelRoute
 }
 
 type upstreamRoute struct {
@@ -42,15 +51,16 @@ type upstreamRoute struct {
 }
 
 type handler struct {
-	upstreamURL         string
-	upstreamBearerToken string
-	maxRequestBytes     int64
-	semaphore           chan struct{}
-	client              *http.Client
-	maxRetries          int
-	retryBaseDelay      time.Duration
-	fallbackModels      []string
-	modelRoutes         map[string]upstreamRoute
+	upstreamURL             string
+	upstreamBearerToken     string
+	maxRequestBytes         int64
+	semaphore               chan struct{}
+	client                  *http.Client
+	maxRetries              int
+	retryBaseDelay          time.Duration
+	upstreamBodyIdleTimeout time.Duration
+	fallbackModels          []string
+	modelRoutes             map[string]upstreamRoute
 }
 
 func NewHandler(cfg Config) (http.Handler, error) {
@@ -78,17 +88,28 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	if retryBaseDelay <= 0 {
 		retryBaseDelay = 250 * time.Millisecond
 	}
+	responseHeaderTimeout := cfg.UpstreamResponseHeaderTimeout
+	if responseHeaderTimeout <= 0 {
+		responseHeaderTimeout = defaultUpstreamResponseHeaderTimeout
+	}
+	bodyIdleTimeout := cfg.UpstreamBodyIdleTimeout
+	if bodyIdleTimeout <= 0 {
+		bodyIdleTimeout = defaultUpstreamBodyIdleTimeout
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 
 	h := &handler{
-		upstreamURL:         upstreamURL,
-		upstreamBearerToken: cfg.UpstreamBearerToken,
-		maxRequestBytes:     maxRequestBytes,
-		semaphore:           make(chan struct{}, maxConcurrent),
-		client:              &http.Client{},
-		maxRetries:          max(cfg.MaxRetries, 0),
-		retryBaseDelay:      retryBaseDelay,
-		fallbackModels:      append([]string(nil), cfg.FallbackModels...),
-		modelRoutes:         modelRoutes,
+		upstreamURL:             upstreamURL,
+		upstreamBearerToken:     cfg.UpstreamBearerToken,
+		maxRequestBytes:         maxRequestBytes,
+		semaphore:               make(chan struct{}, maxConcurrent),
+		client:                  &http.Client{Transport: transport},
+		maxRetries:              max(cfg.MaxRetries, 0),
+		retryBaseDelay:          retryBaseDelay,
+		upstreamBodyIdleTimeout: bodyIdleTimeout,
+		fallbackModels:          append([]string(nil), cfg.FallbackModels...),
+		modelRoutes:             modelRoutes,
 	}
 
 	mux := http.NewServeMux()
@@ -371,6 +392,10 @@ func (h *handler) selectCertifiedModel(requested string, required ...compatibili
 
 func writeUpstreamResponse(w http.ResponseWriter, response *http.Response, err error) {
 	if err != nil {
+		if isUpstreamTimeoutError(err) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "upstream request timed out"})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
 		return
 	}
@@ -419,21 +444,25 @@ func (h *handler) doUpstream(r *http.Request, body []byte, upstreamPath string) 
 
 func (h *handler) doUpstreamMethod(r *http.Request, method string, body []byte, upstreamPath string) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
-		upstreamRequest, err := h.newUpstreamRequest(r, method, body, upstreamPath)
+		attemptContext, cancelAttempt := context.WithCancelCause(r.Context())
+		upstreamRequest, err := h.newUpstreamRequest(attemptContext, method, body, upstreamPath)
 		if err != nil {
+			cancelAttempt(nil)
 			return nil, err
 		}
 
 		response, err := h.client.Do(upstreamRequest)
-		if err == nil && (!retryableStatus(response.StatusCode) || attempt >= h.maxRetries) {
-			return response, nil
-		}
-		if err != nil && attempt >= h.maxRetries {
-			return nil, err
-		}
-		if response != nil {
-			_, _ = io.Copy(io.Discard, response.Body)
-			_ = response.Body.Close()
+		if err != nil {
+			cancelAttempt(nil)
+			if attempt >= h.maxRetries {
+				return nil, err
+			}
+		} else {
+			response.Body = newUpstreamIdleReadCloser(response.Body, attemptContext, cancelAttempt, h.upstreamBodyIdleTimeout)
+			if !retryableStatus(response.StatusCode) || attempt >= h.maxRetries {
+				return response, nil
+			}
+			drainRetryableResponse(response)
 		}
 
 		if err := waitForRetry(r, h.retryBaseDelay*time.Duration(1<<attempt)); err != nil {
@@ -442,7 +471,7 @@ func (h *handler) doUpstreamMethod(r *http.Request, method string, body []byte, 
 	}
 }
 
-func (h *handler) newUpstreamRequest(r *http.Request, method string, body []byte, upstreamPath string) (*http.Request, error) {
+func (h *handler) newUpstreamRequest(ctx context.Context, method string, body []byte, upstreamPath string) (*http.Request, error) {
 	var requestBody io.Reader
 	if method == http.MethodPost || len(body) > 0 {
 		requestBody = bytes.NewReader(body)
@@ -455,7 +484,7 @@ func (h *handler) newUpstreamRequest(r *http.Request, method string, body []byte
 		upstreamBearerToken = route.upstreamBearerToken
 	}
 
-	request, err := http.NewRequestWithContext(r.Context(), method, upstreamEndpoint(upstreamURL, upstreamPath), requestBody)
+	request, err := http.NewRequestWithContext(ctx, method, upstreamEndpoint(upstreamURL, upstreamPath), requestBody)
 	if err != nil {
 		return nil, err
 	}
@@ -466,6 +495,52 @@ func (h *handler) newUpstreamRequest(r *http.Request, method string, body []byte
 		request.Header.Set("Authorization", "Bearer "+upstreamBearerToken)
 	}
 	return request, nil
+}
+
+type upstreamIdleReadCloser struct {
+	body        io.ReadCloser
+	context     context.Context
+	cancel      context.CancelCauseFunc
+	idleTimeout time.Duration
+}
+
+func newUpstreamIdleReadCloser(body io.ReadCloser, ctx context.Context, cancel context.CancelCauseFunc, idleTimeout time.Duration) io.ReadCloser {
+	return &upstreamIdleReadCloser{
+		body:        body,
+		context:     ctx,
+		cancel:      cancel,
+		idleTimeout: idleTimeout,
+	}
+}
+
+func (b *upstreamIdleReadCloser) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(b.idleTimeout, func() {
+		b.cancel(errUpstreamResponseBodyIdleTimeout)
+	})
+	n, err := b.body.Read(p)
+	timer.Stop()
+	if errors.Is(context.Cause(b.context), errUpstreamResponseBodyIdleTimeout) {
+		return n, errUpstreamResponseBodyIdleTimeout
+	}
+	return n, err
+}
+
+func (b *upstreamIdleReadCloser) Close() error {
+	b.cancel(nil)
+	return b.body.Close()
+}
+
+func drainRetryableResponse(response *http.Response) {
+	_, _ = io.CopyN(io.Discard, response.Body, maxRetryDrainBytes+1)
+	_ = response.Body.Close()
+}
+
+func isUpstreamTimeoutError(err error) bool {
+	if errors.Is(err, errUpstreamResponseBodyIdleTimeout) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (h *handler) modelRouteForBody(body []byte) (upstreamRoute, bool) {

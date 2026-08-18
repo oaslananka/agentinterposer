@@ -186,14 +186,16 @@ func newHandler(cfg config.Config) (http.Handler, error) {
 		})
 	}
 	return gateway.NewHandler(gateway.Config{
-		UpstreamURL:         cfg.UpstreamURL,
-		UpstreamBearerToken: cfg.UpstreamBearerToken,
-		MaxConcurrent:       cfg.MaxConcurrent,
-		MaxRetries:          cfg.MaxRetries,
-		RetryBaseDelay:      cfg.RetryBaseDelay,
-		MaxRequestBytes:     cfg.MaxRequestBytes,
-		FallbackModels:      cfg.FallbackModels,
-		ModelRoutes:         modelRoutes,
+		UpstreamURL:                   cfg.UpstreamURL,
+		UpstreamBearerToken:           cfg.UpstreamBearerToken,
+		MaxConcurrent:                 cfg.MaxConcurrent,
+		MaxRetries:                    cfg.MaxRetries,
+		RetryBaseDelay:                cfg.RetryBaseDelay,
+		MaxRequestBytes:               cfg.MaxRequestBytes,
+		UpstreamResponseHeaderTimeout: cfg.UpstreamResponseHeaderTimeout,
+		UpstreamBodyIdleTimeout:       cfg.UpstreamBodyIdleTimeout,
+		FallbackModels:                cfg.FallbackModels,
+		ModelRoutes:                   modelRoutes,
 	})
 }
 

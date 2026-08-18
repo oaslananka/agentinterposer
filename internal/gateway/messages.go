@@ -309,6 +309,10 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	upstreamResponse, err := h.doUpstream(r, translatedBody, "/chat/completions")
 	if err != nil {
+		if isUpstreamTimeoutError(err) {
+			writeAnthropicError(w, http.StatusGatewayTimeout, "timeout_error", "upstream request timed out")
+			return
+		}
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "upstream request failed")
 		return
 	}
@@ -326,6 +330,10 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	upstreamBody, err := readAnthropicUpstreamResponse(upstreamResponse, maxAnthropicUpstreamResponseBytes)
 	if err != nil {
+		if isUpstreamTimeoutError(err) {
+			writeAnthropicError(w, http.StatusGatewayTimeout, "timeout_error", "upstream response body idle timeout")
+			return
+		}
 		if errors.Is(err, errAnthropicUpstreamResponseTooLarge) {
 			writeAnthropicError(w, http.StatusBadGateway, "api_error", errAnthropicUpstreamResponseTooLarge.Error())
 			return

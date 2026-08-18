@@ -106,6 +106,10 @@ func streamAnthropicMessagesWithFrameLimit(w http.ResponseWriter, body io.Reader
 	for {
 		frame, err := readSSEFrame(reader, frameLimit)
 		if err != nil && !errors.Is(err, io.EOF) {
+			if isUpstreamTimeoutError(err) {
+				state.failTimeout(w, flusher, "upstream response body idle timeout")
+				return
+			}
 			message := "unable to read upstream stream"
 			if errors.Is(err, errUpstreamSSEFrameTooLarge) {
 				message = err.Error()
@@ -387,10 +391,22 @@ func (s *messagesStreamState) fail(w http.ResponseWriter, flusher http.Flusher, 
 }
 
 func (s *messagesStreamState) failStream(w http.ResponseWriter, flusher http.Flusher, message string) {
+	s.failStreamWithType(w, flusher, "api_error", message)
+}
+
+func (s *messagesStreamState) failTimeout(w http.ResponseWriter, flusher http.Flusher, message string) {
+	if !s.started {
+		writeAnthropicError(w, http.StatusGatewayTimeout, "timeout_error", message)
+		return
+	}
+	s.failStreamWithType(w, flusher, "timeout_error", message)
+}
+
+func (s *messagesStreamState) failStreamWithType(w http.ResponseWriter, flusher http.Flusher, errorType, message string) {
 	_ = writeAnthropicSSE(w, flusher, "error", map[string]any{
 		"type": "error",
 		"error": map[string]string{
-			"type":    "api_error",
+			"type":    errorType,
 			"message": message,
 		},
 	})

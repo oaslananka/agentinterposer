@@ -14,12 +14,14 @@ import (
 )
 
 const (
-	defaultListenAddr            = "127.0.0.1:11435"
-	defaultUpstreamURL           = "https://integrate.api.nvidia.com"
-	defaultMaxConcurrent         = 3
-	defaultMaxRetries            = 3
-	defaultRetryBaseDelay        = 500 * time.Millisecond
-	defaultMaxRequestBytes int64 = 32 << 20
+	defaultListenAddr                          = "127.0.0.1:11435"
+	defaultUpstreamURL                         = "https://integrate.api.nvidia.com"
+	defaultMaxConcurrent                       = 3
+	defaultMaxRetries                          = 3
+	defaultRetryBaseDelay                      = 500 * time.Millisecond
+	defaultMaxRequestBytes               int64 = 32 << 20
+	defaultUpstreamResponseHeaderTimeout       = 2 * time.Minute
+	defaultUpstreamBodyIdleTimeout             = 2 * time.Minute
 )
 
 type ModelRoute struct {
@@ -29,15 +31,17 @@ type ModelRoute struct {
 }
 
 type Config struct {
-	ListenAddr          string
-	UpstreamURL         string
-	UpstreamBearerToken string
-	MaxConcurrent       int
-	MaxRetries          int
-	RetryBaseDelay      time.Duration
-	MaxRequestBytes     int64
-	FallbackModels      []string
-	ModelRoutes         []ModelRoute
+	ListenAddr                    string
+	UpstreamURL                   string
+	UpstreamBearerToken           string
+	MaxConcurrent                 int
+	MaxRetries                    int
+	RetryBaseDelay                time.Duration
+	MaxRequestBytes               int64
+	UpstreamResponseHeaderTimeout time.Duration
+	UpstreamBodyIdleTimeout       time.Duration
+	FallbackModels                []string
+	ModelRoutes                   []ModelRoute
 }
 
 func LoadFromEnv() (Config, error) {
@@ -46,13 +50,15 @@ func LoadFromEnv() (Config, error) {
 
 func Load(getenv func(string) string) (Config, error) {
 	cfg := Config{
-		ListenAddr:          valueOrDefault(getenv("AGENTINTERPOSER_ADDR"), defaultListenAddr),
-		UpstreamURL:         valueOrDefault(getenv("AGENTINTERPOSER_UPSTREAM_URL"), defaultUpstreamURL),
-		UpstreamBearerToken: valueOrDefault(getenv("AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN"), getenv("NVIDIA_API_KEY")),
-		MaxConcurrent:       defaultMaxConcurrent,
-		MaxRetries:          defaultMaxRetries,
-		RetryBaseDelay:      defaultRetryBaseDelay,
-		MaxRequestBytes:     defaultMaxRequestBytes,
+		ListenAddr:                    valueOrDefault(getenv("AGENTINTERPOSER_ADDR"), defaultListenAddr),
+		UpstreamURL:                   valueOrDefault(getenv("AGENTINTERPOSER_UPSTREAM_URL"), defaultUpstreamURL),
+		UpstreamBearerToken:           valueOrDefault(getenv("AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN"), getenv("NVIDIA_API_KEY")),
+		MaxConcurrent:                 defaultMaxConcurrent,
+		MaxRetries:                    defaultMaxRetries,
+		RetryBaseDelay:                defaultRetryBaseDelay,
+		MaxRequestBytes:               defaultMaxRequestBytes,
+		UpstreamResponseHeaderTimeout: defaultUpstreamResponseHeaderTimeout,
+		UpstreamBodyIdleTimeout:       defaultUpstreamBodyIdleTimeout,
 	}
 
 	if cfg.UpstreamBearerToken == "" {
@@ -87,6 +93,20 @@ func Load(getenv func(string) string) (Config, error) {
 		if err != nil || cfg.RetryBaseDelay <= 0 {
 			return Config{}, errors.New("AGENTINTERPOSER_RETRY_BASE_DELAY must be a positive duration")
 		}
+	}
+	if cfg.UpstreamResponseHeaderTimeout, err = positiveDuration(
+		getenv("AGENTINTERPOSER_UPSTREAM_RESPONSE_HEADER_TIMEOUT"),
+		defaultUpstreamResponseHeaderTimeout,
+		"AGENTINTERPOSER_UPSTREAM_RESPONSE_HEADER_TIMEOUT",
+	); err != nil {
+		return Config{}, err
+	}
+	if cfg.UpstreamBodyIdleTimeout, err = positiveDuration(
+		getenv("AGENTINTERPOSER_UPSTREAM_BODY_IDLE_TIMEOUT"),
+		defaultUpstreamBodyIdleTimeout,
+		"AGENTINTERPOSER_UPSTREAM_BODY_IDLE_TIMEOUT",
+	); err != nil {
+		return Config{}, err
 	}
 
 	return cfg, nil
@@ -145,6 +165,17 @@ func nonNegativeInt(raw string, fallback int) (int, error) {
 	value, err := strconv.Atoi(raw)
 	if err != nil || value < 0 {
 		return 0, errors.New("AGENTINTERPOSER_MAX_RETRIES must be a non-negative integer")
+	}
+	return value, nil
+}
+
+func positiveDuration(raw string, fallback time.Duration, name string) (time.Duration, error) {
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", name)
 	}
 	return value, nil
 }
