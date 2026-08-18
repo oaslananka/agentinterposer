@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -197,7 +198,21 @@ func validateAnthropicBeta(values []string) error {
 	return nil
 }
 
+func newAnthropicRequestID() string {
+	return "req_ai_" + strings.ToLower(rand.Text())
+}
+
+func ensureAnthropicRequestID(w http.ResponseWriter) string {
+	if requestID := w.Header().Get("request-id"); requestID != "" {
+		return requestID
+	}
+	requestID := newAnthropicRequestID()
+	w.Header().Set("request-id", requestID)
+	return requestID
+}
+
 func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
+	ensureAnthropicRequestID(w)
 	if h.upstreamURL == "" {
 		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "upstream is not configured")
 		return
@@ -881,22 +896,35 @@ func anthropicErrorType(status int) string {
 		return "invalid_request_error"
 	case http.StatusUnauthorized:
 		return "authentication_error"
+	case http.StatusPaymentRequired:
+		return "billing_error"
 	case http.StatusForbidden:
 		return "permission_error"
 	case http.StatusNotFound:
 		return "not_found_error"
+	case http.StatusConflict:
+		return "conflict_error"
 	case http.StatusRequestEntityTooLarge:
 		return "request_too_large"
 	case http.StatusTooManyRequests:
 		return "rate_limit_error"
+	case http.StatusGatewayTimeout:
+		return "timeout_error"
+	case 529:
+		return "overloaded_error"
 	default:
+		if status >= 400 && status < 500 {
+			return "invalid_request_error"
+		}
 		return "api_error"
 	}
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, errorType, message string) {
+	requestID := ensureAnthropicRequestID(w)
 	writeJSON(w, status, map[string]any{
-		"type": "error",
+		"type":       "error",
+		"request_id": requestID,
 		"error": map[string]string{
 			"type":    errorType,
 			"message": message,

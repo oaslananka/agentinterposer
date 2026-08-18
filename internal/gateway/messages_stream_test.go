@@ -201,6 +201,9 @@ func TestHandlerFlushesAnthropicTextDeltaBeforeUpstreamCompletes(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.StatusCode)
 	}
+	if requestID := response.Header.Get("request-id"); requestID == "" {
+		t.Fatal("streaming response missing request-id header")
+	}
 
 	reader := bufio.NewReader(response.Body)
 	seenFirstDelta := false

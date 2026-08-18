@@ -42,6 +42,9 @@ func TestHandlerTranslatesAnthropicTextMessageToChatCompletions(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
+	if response.Header().Get("request-id") == "" {
+		t.Fatal("successful Messages response missing request-id header")
+	}
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("upstream path = %q, want /v1/chat/completions", gotPath)
 	}
@@ -1062,6 +1065,66 @@ func TestHandlerRejectsUnsupportedAnthropicBetaBeforeUpstream(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "anthropic-beta") {
 		t.Fatalf("body = %s, want anthropic-beta error", response.Body.String())
+	}
+}
+
+func TestAnthropicRequestIDIsStablePerResponseAndUniqueAcrossResponses(t *testing.T) {
+	t.Parallel()
+
+	first := httptest.NewRecorder()
+	firstID := ensureAnthropicRequestID(first)
+	if firstID == "" || first.Header().Get("request-id") != firstID {
+		t.Fatalf("first request-id = %q header=%q", firstID, first.Header().Get("request-id"))
+	}
+	if repeated := ensureAnthropicRequestID(first); repeated != firstID {
+		t.Fatalf("request-id changed within one response: first=%q repeated=%q", firstID, repeated)
+	}
+	secondID := ensureAnthropicRequestID(httptest.NewRecorder())
+	if secondID == firstID {
+		t.Fatalf("request-id reused across responses: %q", firstID)
+	}
+}
+
+func TestAnthropicErrorBodyRepeatsGatewayRequestID(t *testing.T) {
+	t.Parallel()
+
+	response := httptest.NewRecorder()
+	writeAnthropicError(response, http.StatusBadRequest, "invalid_request_error", "bad request")
+	headerID := response.Header().Get("request-id")
+	var envelope struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if headerID == "" || envelope.RequestID != headerID {
+		t.Fatalf("request_id body/header mismatch: body=%q header=%q", envelope.RequestID, headerID)
+	}
+}
+
+func TestAnthropicErrorTypeMatchesCurrentClaudeTaxonomy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		status int
+		want   string
+	}{
+		{http.StatusBadRequest, "invalid_request_error"},
+		{http.StatusPaymentRequired, "billing_error"},
+		{http.StatusForbidden, "permission_error"},
+		{http.StatusNotFound, "not_found_error"},
+		{http.StatusConflict, "conflict_error"},
+		{http.StatusRequestEntityTooLarge, "request_too_large"},
+		{http.StatusTooManyRequests, "rate_limit_error"},
+		{http.StatusTeapot, "invalid_request_error"},
+		{http.StatusInternalServerError, "api_error"},
+		{http.StatusGatewayTimeout, "timeout_error"},
+		{529, "overloaded_error"},
+	}
+	for _, test := range tests {
+		if got := anthropicErrorType(test.status); got != test.want {
+			t.Errorf("anthropicErrorType(%d) = %q, want %q", test.status, got, test.want)
+		}
 	}
 }
 
