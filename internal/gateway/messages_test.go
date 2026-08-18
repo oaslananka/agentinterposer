@@ -1128,6 +1128,74 @@ func TestAnthropicErrorTypeMatchesCurrentClaudeTaxonomy(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsInvalidMessagesHTTPContractBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "unexpected upstream call", http.StatusInternalServerError)
+	}))
+	tests := []struct {
+		name        string
+		target      string
+		contentType string
+		wantError   string
+	}{
+		{name: "beta_false", target: "/v1/messages?beta=false", contentType: "application/json", wantError: "query"},
+		{name: "unknown_query", target: "/v1/messages?future=true", contentType: "application/json", wantError: "query"},
+		{name: "mixed_query", target: "/v1/messages?beta=true&future=true", contentType: "application/json", wantError: "query"},
+		{name: "missing_content_type", target: "/v1/messages", wantError: "Content-Type"},
+		{name: "wrong_content_type", target: "/v1/messages", contentType: "text/plain", wantError: "Content-Type"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.target, strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
+			if test.contentType != "" {
+				request.Header.Set("Content-Type", test.contentType)
+			}
+			request.Header.Set("anthropic-version", supportedAnthropicMessagesVersion)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), test.wantError) {
+				t.Fatalf("status/body = %d %s, want 400 containing %q", response.Code, response.Body.String(), test.wantError)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+}
+
+func TestHandlerDoesNotForwardClientAPIKeyUpstream(t *testing.T) {
+	t.Parallel()
+
+	var gotAPIKey, gotAuthorization string
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-ok","model":"nvidia/test","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	request.Header.Set("anthropic-version", supportedAnthropicMessagesVersion)
+	request.Header.Set("x-api-key", "local-client-placeholder")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	if gotAPIKey != "" {
+		t.Fatalf("upstream x-api-key = %q, want empty", gotAPIKey)
+	}
+	if gotAuthorization != "Bearer server-secret" {
+		t.Fatalf("upstream Authorization = %q, want server-owned bearer", gotAuthorization)
+	}
+}
+
 func TestHandlerRequiresSupportedAnthropicVersionBeforeUpstream(t *testing.T) {
 	t.Parallel()
 
