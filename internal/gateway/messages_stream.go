@@ -48,6 +48,23 @@ type bufferedToolCall struct {
 	Arguments strings.Builder
 }
 
+type downstreamWriteError struct {
+	err error
+}
+
+func (e *downstreamWriteError) Error() string {
+	return e.err.Error()
+}
+
+func (e *downstreamWriteError) Unwrap() error {
+	return e.err
+}
+
+func isDownstreamWriteError(err error) bool {
+	var target *downstreamWriteError
+	return errors.As(err, &target)
+}
+
 type messagesStreamState struct {
 	started      bool
 	messageID    string
@@ -82,6 +99,9 @@ func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedMod
 		if data != "" {
 			if strings.TrimSpace(data) == "[DONE]" {
 				if err := state.finish(w, flusher); err != nil {
+					if isDownstreamWriteError(err) {
+						return
+					}
 					state.fail(w, flusher, err.Error())
 				}
 				return
@@ -100,6 +120,9 @@ func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedMod
 				return
 			}
 			if err := state.consume(w, flusher, chunk); err != nil {
+				if isDownstreamWriteError(err) {
+					return
+				}
 				state.fail(w, flusher, err.Error())
 				return
 			}
@@ -110,6 +133,9 @@ func streamAnthropicMessages(w http.ResponseWriter, body io.Reader, requestedMod
 				return
 			}
 			if finishErr := state.finish(w, flusher); finishErr != nil {
+				if isDownstreamWriteError(finishErr) {
+					return
+				}
 				state.fail(w, flusher, finishErr.Error())
 			}
 			return
@@ -371,7 +397,7 @@ func writeAnthropicSSE(w http.ResponseWriter, flusher http.Flusher, event string
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded); err != nil {
-		return err
+		return &downstreamWriteError{err: err}
 	}
 	flusher.Flush()
 	return nil
