@@ -12,60 +12,69 @@ import (
 	"time"
 )
 
-func TestHandlerTimesOutWaitingForUpstreamResponseHeaders(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	defer upstream.Close()
+const (
+	timeoutMessagesRequest       = `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`
+	timeoutMessagesStreamRequest = `{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+)
 
-	handler, err := NewHandler(Config{
+func newTimeoutTestHandler(t *testing.T, upstreamHandler http.Handler, headerTimeout, bodyIdleTimeout time.Duration, maxRetries int) http.Handler {
+	t.Helper()
+	upstream := httptest.NewServer(upstreamHandler)
+	t.Cleanup(upstream.Close)
+
+	cfg := Config{
 		UpstreamURL:                   upstream.URL,
 		UpstreamBearerToken:           "server-secret",
 		MaxConcurrent:                 1,
-		MaxRetries:                    0,
+		MaxRetries:                    maxRetries,
 		MaxRequestBytes:               1 << 20,
-		UpstreamResponseHeaderTimeout: 25 * time.Millisecond,
-		UpstreamBodyIdleTimeout:       time.Second,
-	})
+		UpstreamResponseHeaderTimeout: headerTimeout,
+		UpstreamBodyIdleTimeout:       bodyIdleTimeout,
+	}
+	if maxRetries > 0 {
+		cfg.RetryBaseDelay = time.Millisecond
+	}
+	handler, err := NewHandler(cfg)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
+	return handler
+}
+
+func stallingUpstream(contentType, initialBody string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(http.StatusOK)
+		if initialBody != "" {
+			_, _ = w.Write([]byte(initialBody))
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}
+}
+
+func TestHandlerTimesOutWaitingForUpstreamResponseHeaders(t *testing.T) {
+	handler := newTimeoutTestHandler(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}), 25*time.Millisecond, time.Second, 0)
 
 	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-
 	if response.Code != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want 504; body=%s", response.Code, response.Body.String())
 	}
 }
 
 func TestMessagesTimesOutWhenNonStreamingUpstreamBodyStopsMakingProgress(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"chatcmpl-stalled"`))
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	}))
-	defer upstream.Close()
+	handler := newTimeoutTestHandler(t,
+		stallingUpstream("application/json", `{"id":"chatcmpl-stalled"`),
+		time.Second, 25*time.Millisecond, 0,
+	)
 
-	handler, err := NewHandler(Config{
-		UpstreamURL:                   upstream.URL,
-		UpstreamBearerToken:           "server-secret",
-		MaxConcurrent:                 1,
-		MaxRetries:                    0,
-		MaxRequestBytes:               1 << 20,
-		UpstreamResponseHeaderTimeout: time.Second,
-		UpstreamBodyIdleTimeout:       25 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
-
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
+	response := serveMessages(handler, timeoutMessagesRequest)
 	if response.Code != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want 504; body=%s", response.Code, response.Body.String())
 	}
@@ -83,30 +92,12 @@ func TestMessagesTimesOutWhenNonStreamingUpstreamBodyStopsMakingProgress(t *test
 }
 
 func TestMessagesStreamTimesOutBeforeMessageStartWhenUpstreamBodyIsIdle(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	}))
-	defer upstream.Close()
+	handler := newTimeoutTestHandler(t,
+		stallingUpstream("text/event-stream", ""),
+		time.Second, 25*time.Millisecond, 0,
+	)
 
-	handler, err := NewHandler(Config{
-		UpstreamURL:                   upstream.URL,
-		UpstreamBearerToken:           "server-secret",
-		MaxConcurrent:                 1,
-		MaxRetries:                    0,
-		MaxRequestBytes:               1 << 20,
-		UpstreamResponseHeaderTimeout: time.Second,
-		UpstreamBodyIdleTimeout:       25 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
-
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	response := serveMessages(handler, timeoutMessagesStreamRequest)
 	if response.Code != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want 504; body=%s", response.Code, response.Body.String())
 	}
@@ -116,31 +107,13 @@ func TestMessagesStreamTimesOutBeforeMessageStartWhenUpstreamBodyIsIdle(t *testi
 }
 
 func TestMessagesStreamUsesTimeoutErrorAfterMessageStartWhenUpstreamBodyBecomesIdle(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-idle\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":null}]}\n\n")
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	}))
-	defer upstream.Close()
+	firstChunk := "data: {\"id\":\"chatcmpl-idle\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":null}]}\n\n"
+	handler := newTimeoutTestHandler(t,
+		stallingUpstream("text/event-stream", firstChunk),
+		time.Second, 25*time.Millisecond, 0,
+	)
 
-	handler, err := NewHandler(Config{
-		UpstreamURL:                   upstream.URL,
-		UpstreamBearerToken:           "server-secret",
-		MaxConcurrent:                 1,
-		MaxRetries:                    0,
-		MaxRequestBytes:               1 << 20,
-		UpstreamResponseHeaderTimeout: time.Second,
-		UpstreamBodyIdleTimeout:       25 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
-
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	response := serveMessages(handler, timeoutMessagesStreamRequest)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
 	}
@@ -150,7 +123,7 @@ func TestMessagesStreamUsesTimeoutErrorAfterMessageStartWhenUpstreamBodyBecomesI
 }
 
 func TestMessagesStreamKeepsActiveLongStreamAliveAcrossIdleTimeoutIntervals(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	activeStream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
 		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-active\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"one\"},\"finish_reason\":null}]}\n\n")
@@ -159,26 +132,12 @@ func TestMessagesStreamKeepsActiveLongStreamAliveAcrossIdleTimeoutIntervals(t *t
 		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-active\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"two\"},\"finish_reason\":null}]}\n\n")
 		flusher.Flush()
 		time.Sleep(15 * time.Millisecond)
-		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-active\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
-		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-active\",\"model\":\"nvidia/test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 		flusher.Flush()
-	}))
-	defer upstream.Close()
-
-	handler, err := NewHandler(Config{
-		UpstreamURL:                   upstream.URL,
-		UpstreamBearerToken:           "server-secret",
-		MaxConcurrent:                 1,
-		MaxRetries:                    0,
-		MaxRequestBytes:               1 << 20,
-		UpstreamResponseHeaderTimeout: time.Second,
-		UpstreamBodyIdleTimeout:       25 * time.Millisecond,
 	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
+	handler := newTimeoutTestHandler(t, activeStream, time.Second, 25*time.Millisecond, 0)
 
-	response := serveMessages(handler, `{"model":"nvidia/test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	response := serveMessages(handler, timeoutMessagesStreamRequest)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
 	}
@@ -193,36 +152,19 @@ func TestMessagesStreamKeepsActiveLongStreamAliveAcrossIdleTimeoutIntervals(t *t
 func TestRetryableUpstreamResponseDrainIsByteBounded(t *testing.T) {
 	var attempts atomic.Int32
 	firstCancelled := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempt := attempts.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		if attempt == 1 {
+	retryUpstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(strings.Repeat("x", 128<<10)))
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
+			w.(http.Flusher).Flush()
 			<-r.Context().Done()
 			close(firstCancelled)
 			return
 		}
 		_, _ = w.Write([]byte(`{"id":"chatcmpl-ok","choices":[]}`))
-	}))
-	defer upstream.Close()
-
-	handler, err := NewHandler(Config{
-		UpstreamURL:                   upstream.URL,
-		UpstreamBearerToken:           "server-secret",
-		MaxConcurrent:                 1,
-		MaxRetries:                    1,
-		RetryBaseDelay:                time.Millisecond,
-		MaxRequestBytes:               1 << 20,
-		UpstreamResponseHeaderTimeout: time.Second,
-		UpstreamBodyIdleTimeout:       time.Second,
 	})
-	if err != nil {
-		t.Fatalf("NewHandler() error = %v", err)
-	}
+	handler := newTimeoutTestHandler(t, retryUpstream, time.Second, time.Second, 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
@@ -230,11 +172,8 @@ func TestRetryableUpstreamResponseDrainIsByteBounded(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; attempts=%d body=%s", response.Code, attempts.Load(), response.Body.String())
-	}
-	if attempts.Load() != 2 {
-		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	if response.Code != http.StatusOK || attempts.Load() != 2 {
+		t.Fatalf("status = %d attempts=%d, want 200/2; body=%s", response.Code, attempts.Load(), response.Body.String())
 	}
 	select {
 	case <-firstCancelled:

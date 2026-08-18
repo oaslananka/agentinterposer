@@ -499,7 +499,7 @@ func (h *handler) newUpstreamRequest(ctx context.Context, method string, body []
 
 type upstreamIdleReadCloser struct {
 	body        io.ReadCloser
-	context     context.Context
+	cause       func() error
 	cancel      context.CancelCauseFunc
 	idleTimeout time.Duration
 }
@@ -507,7 +507,7 @@ type upstreamIdleReadCloser struct {
 func newUpstreamIdleReadCloser(body io.ReadCloser, ctx context.Context, cancel context.CancelCauseFunc, idleTimeout time.Duration) io.ReadCloser {
 	return &upstreamIdleReadCloser{
 		body:        body,
-		context:     ctx,
+		cause:       func() error { return context.Cause(ctx) },
 		cancel:      cancel,
 		idleTimeout: idleTimeout,
 	}
@@ -519,7 +519,7 @@ func (b *upstreamIdleReadCloser) Read(p []byte) (int, error) {
 	})
 	n, err := b.body.Read(p)
 	timer.Stop()
-	if errors.Is(context.Cause(b.context), errUpstreamResponseBodyIdleTimeout) {
+	if errors.Is(b.cause(), errUpstreamResponseBodyIdleTimeout) {
 		return n, errUpstreamResponseBodyIdleTimeout
 	}
 	return n, err
