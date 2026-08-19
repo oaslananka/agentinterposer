@@ -580,13 +580,15 @@ func (h *handler) modelRouteForBody(body []byte) (upstreamRoute, bool) {
 	if len(h.modelRoutes) == 0 || len(body) == 0 {
 		return upstreamRoute{}, false
 	}
-	var envelope struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	object, ok := decodeRoutingObject(body)
+	if !ok {
 		return upstreamRoute{}, false
 	}
-	route, ok := h.modelRoutes[envelope.Model]
+	model, ok := routingStringField(object, "model")
+	if !ok || model == "" {
+		return upstreamRoute{}, false
+	}
+	route, ok := h.modelRoutes[model]
 	return route, ok
 }
 
