@@ -56,6 +56,7 @@ on:
           - codex-loop
           - codex-long-loop
           - codex-four-loop
+          - opencode
 
 permissions:
   contents: read
@@ -1176,6 +1177,233 @@ jobs:
           PY
           echo 'messages_stream_verified=true' >> "$GITHUB_OUTPUT"
 
+      - name: Install OpenCode certification client
+        if: ${{ inputs.scope == 'opencode' }}
+        id: opencode_install
+        shell: bash
+        run: |
+          set -euo pipefail
+          root='/tmp/agentinterposer-opencode-client'
+          cache="$RUNNER_TEMP/opencode-npm-cache"
+          expected_integrity='sha512-WmeUnhljYJ252wywKTiW4bNDzsas2njpjPUEh0jM6HKNI4vFxJtREtzaWViY4AKEAcOkLWT8Ll17ixvcHz3AnA=='
+          rm -rf "$root" "$cache"
+          mkdir -p "$root" "$cache"
+          chmod 0755 "$root"
+
+          if [ "$(uname -m)" != 'x86_64' ]; then
+            echo 'OpenCode certification currently requires the linux-x64 hosted runner.' >&2
+            exit 1
+          fi
+          package="$(cd "$root" && npm --cache "$cache" pack --ignore-scripts --silent opencode-linux-x64@1.18.18 | tail -1)"
+          package_path="$root/$package"
+          python3 - "$package_path" "$expected_integrity" <<'PY'
+          import base64
+          import hashlib
+          import sys
+
+          path, expected = sys.argv[1:]
+          actual = "sha512-" + base64.b64encode(hashlib.sha512(open(path, "rb").read()).digest()).decode()
+          if actual != expected:
+              raise SystemExit("OpenCode native package integrity mismatch")
+          print("opencode_package_integrity=ok")
+          PY
+
+          tar -xOf "$package_path" package/bin/opencode > "$root/opencode"
+          chmod 0755 "$root/opencode"
+          rm -f "$package_path"
+          opencode_bin="$root/opencode"
+          version="$($opencode_bin --version)"
+          if [ "$version" != '1.18.18' ]; then
+            echo "Unexpected OpenCode version: $version" >&2
+            exit 1
+          fi
+          echo 'opencode_version=1.18.18'
+          echo "opencode_bin=$opencode_bin" >> "$GITHUB_OUTPUT"
+
+      - name: Probe OpenCode dependent tool loop
+        if: ${{ inputs.scope == 'opencode' }}
+        id: opencode
+        shell: bash
+        env:
+          NVIDIA_API_KEY: ${{ steps.doppler.outputs.NVIDIA_API_KEY }}
+          MODEL: ${{ inputs.model }}
+          OPENCODE_BIN: ${{ steps.opencode_install.outputs.opencode_bin }}
+        run: |
+          set -euo pipefail
+          if [ "$MODEL" != 'nvidia/nemotron-3-super-120b-a12b' ]; then
+            echo 'OpenCode certification is currently defined only for nvidia/nemotron-3-super-120b-a12b.' >&2
+            exit 2
+          fi
+          opencode_user='agentinterposer-opencode'
+          opencode_home="/tmp/agentinterposer-opencode-home-${GITHUB_RUN_ID}"
+          opencode_work="/tmp/agentinterposer-opencode-run-${GITHUB_RUN_ID}"
+          binary="$RUNNER_TEMP/agentinterposer-opencode"
+          gateway_log="$RUNNER_TEMP/agentinterposer-opencode.log"
+          opencode_jsonl="$RUNNER_TEMP/opencode-events.jsonl"
+          opencode_stderr="$RUNNER_TEMP/opencode-stderr.log"
+          generated_config="$RUNNER_TEMP/opencode.json"
+          proof_source="$RUNNER_TEMP/opencode-proof.txt"
+          pid=''
+          opencode_user_created=false
+          runner_shell_pid=$$
+
+          cleanup() {
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            fi
+            if [ "$opencode_user_created" = true ]; then
+              sudo pkill -KILL -u "$opencode_user" 2>/dev/null || true
+              for _ in {1..20}; do
+                if ! pgrep -u "$opencode_user" >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 0.1
+              done
+              sudo userdel "$opencode_user" 2>/dev/null || true
+            fi
+            sudo rm -rf "$opencode_home" "$opencode_work"
+            rm -f "$binary" "$gateway_log" "$opencode_jsonl" "$opencode_stderr" "$generated_config" "$proof_source"
+          }
+          trap cleanup EXIT
+
+          if id "$opencode_user" >/dev/null 2>&1; then
+            echo 'Dedicated OpenCode certification user unexpectedly already exists.' >&2
+            exit 1
+          fi
+          sudo useradd --system --home-dir "$opencode_home" --shell /bin/bash "$opencode_user"
+          opencode_user_created=true
+          sudo install -d -m 0700 -o "$opencode_user" -g "$opencode_user" "$opencode_home"
+          sudo install -d -m 0700 -o "$opencode_user" -g "$opencode_user" "$opencode_work"
+
+          go build -trimpath -o "$binary" ./cmd/agentinterposer
+          "$binary" config opencode "$MODEL" 'http://127.0.0.1:11435' > "$generated_config"
+          sudo install -o "$opencode_user" -g "$opencode_user" -m 0600 "$generated_config" "$opencode_work/opencode.json"
+
+          python3 - "$proof_source" <<'PY'
+          import secrets
+          import sys
+
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              handle.write(secrets.token_hex(16) + "\n")
+          PY
+          proof="$(tr -d '\r\n' < "$proof_source")"
+          expected="$(printf '%s' "$proof" | sha256sum | awk '{print $1}')"
+          sudo install -o "$opencode_user" -g "$opencode_user" -m 0600 "$proof_source" "$opencode_work/proof.txt"
+
+          AGENTINTERPOSER_ADDR='127.0.0.1:11435' \
+            NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            "$binary" >"$gateway_log" 2>&1 &
+          pid=$!
+          ready=false
+          for _ in {1..30}; do
+            if curl --silent --fail 'http://127.0.0.1:11435/healthz' >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != true ]; then
+            echo 'AgentInterposer did not become ready for the OpenCode probe.' >&2
+            exit 1
+          fi
+
+          if sudo -u "$opencode_user" sh -c "cat /proc/$runner_shell_pid/environ >/dev/null 2>&1"; then
+            echo 'OpenCode isolation failed: runner environment is readable.' >&2
+            exit 1
+          fi
+          if sudo -u "$opencode_user" sh -c "cat /proc/$pid/environ >/dev/null 2>&1"; then
+            echo 'OpenCode isolation failed: gateway environment is readable.' >&2
+            exit 1
+          fi
+          if sudo -u "$opencode_user" sudo -n true >/dev/null 2>&1; then
+            echo 'OpenCode isolation failed: certification user has sudo access.' >&2
+            exit 1
+          fi
+          if ! sudo -u "$opencode_user" test -x "$OPENCODE_BIN"; then
+            echo 'OpenCode binary is not executable by the certification user.' >&2
+            exit 1
+          fi
+          echo 'opencode_os_user_isolation=ok'
+          echo 'opencode_secret_environment_isolation=ok'
+
+          prompt=$'Use exactly two tools, sequentially, and no others. First use the read tool exactly once to read ./proof.txt. After you receive that result, use the bash tool exactly once to compute the lowercase SHA-256 digest of the literal 32-character value returned by the read tool. The bash command itself must contain that literal value; do not read proof.txt again, use command substitution, or use an environment variable. After bash completes, reply with exactly the 64-character lowercase SHA-256 digest from stdout and no other text.'
+          set +e
+          sudo -u "$opencode_user" -- env -i \
+            HOME="$opencode_home" \
+            PATH='/usr/local/bin:/usr/bin:/bin' \
+            AGENTINTERPOSER_CLIENT_KEY='agentinterposer-local-placeholder' \
+            NO_PROXY='127.0.0.1,localhost' \
+            bash -c 'cd "$1" && shift && exec "$@"' bash "$opencode_work" \
+            timeout --signal=TERM --kill-after=10s 180s \
+            "$OPENCODE_BIN" run \
+              --auto \
+              --model "agentinterposer/$MODEL" \
+              --format json \
+              "$prompt" \
+              >"$opencode_jsonl" 2>"$opencode_stderr"
+          opencode_status=$?
+          set -e
+          echo "opencode_exit=${opencode_status}"
+
+          python3 - "$opencode_jsonl" "$proof" "$expected" "$opencode_status" <<'PY'
+          import json
+          import sys
+
+          path, proof, expected, raw_status = sys.argv[1:]
+          if int(raw_status) != 0:
+              raise SystemExit("OpenCode client exited non-zero")
+          events = []
+          for raw in open(path, encoding="utf-8"):
+              raw = raw.strip()
+              if not raw:
+                  continue
+              try:
+                  events.append(json.loads(raw))
+              except json.JSONDecodeError:
+                  continue
+
+          completed = []
+          final_text = []
+          finishes = []
+          for event in events:
+              if not isinstance(event, dict):
+                  continue
+              part = event.get("part")
+              if event.get("type") == "tool_use" and isinstance(part, dict) and part.get("type") == "tool":
+                  state = part.get("state")
+                  if isinstance(state, dict) and state.get("status") == "completed":
+                      completed.append(part)
+              if event.get("type") == "text" and isinstance(part, dict) and isinstance(part.get("text"), str):
+                  final_text.append(part["text"])
+              if event.get("type") == "step_finish" and isinstance(part, dict):
+                  finishes.append(part.get("reason"))
+
+          if len(completed) != 2:
+              raise SystemExit(f"OpenCode completed tool count={len(completed)}, want exactly 2")
+          first, second = completed
+          if first.get("tool") != "read" or second.get("tool") != "bash":
+              raise SystemExit(f"OpenCode tool order was {[part.get('tool') for part in completed]}, want read,bash")
+          first_state = first.get("state") or {}
+          second_state = second.get("state") or {}
+          if proof not in str(first_state.get("output") or ""):
+              raise SystemExit("OpenCode read tool result did not contain the hidden proof")
+          second_input = second_state.get("input") or {}
+          command = second_input.get("command") if isinstance(second_input, dict) else None
+          if not isinstance(command, str) or proof not in command or "sha256sum" not in command or "proof.txt" in command:
+              raise SystemExit("OpenCode bash command was not derived from the literal read-tool proof")
+          if expected not in str(second_state.get("output") or ""):
+              raise SystemExit("OpenCode bash result did not contain the independently expected digest")
+          if not final_text or final_text[-1].strip().lower() != expected:
+              raise SystemExit("OpenCode final response did not exactly preserve the terminal digest")
+          if not finishes or finishes[-1] != "stop":
+              raise SystemExit("OpenCode did not terminate with stop")
+          print("opencode_version=1.18.18")
+          print("opencode_tool_order=read,bash")
+          print("opencode_dependent_tool_loop=ok")
+          PY
+          echo 'opencode_verified=true' >> "$GITHUB_OUTPUT"
+
       - name: Install Claude Code certification client
         if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
         id: claude_install
@@ -1979,6 +2207,8 @@ jobs:
           CODEX_LOOP_VERIFIED: ${{ steps.codex.outputs.codex_loop_verified }}
           CODEX_LONG_LOOP_VERIFIED: ${{ steps.codex.outputs.codex_long_loop_verified }}
           CODEX_FOUR_LOOP_VERIFIED: ${{ steps.codex.outputs.codex_four_loop_verified }}
+          OPENCODE_OUTCOME: ${{ steps.opencode.outcome }}
+          OPENCODE_VERIFIED: ${{ steps.opencode.outputs.opencode_verified }}
         run: |
           {
             echo '## NVIDIA hosted compatibility probe'
@@ -1997,6 +2227,9 @@ jobs:
             elif [ "$SCOPE" = 'codex-four-loop' ]; then
               echo "- Codex CLI 0.148.0 step: ${CODEX_OUTCOME:-not-run}"
               echo "- Codex dependent four-tool Responses loop: ${CODEX_FOUR_LOOP_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'opencode' ]; then
+              echo "- OpenCode CLI 1.18.18 step: ${OPENCODE_OUTCOME:-not-run}"
+              echo "- OpenCode dependent read + Bash tool loop: ${OPENCODE_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'claude-code' ]; then
               echo "- Claude Code CLI 2.1.235 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code Messages tool round trip: ${CLAUDE_CODE_VERIFIED:-not-verified}"
