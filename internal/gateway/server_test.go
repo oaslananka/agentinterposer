@@ -1148,3 +1148,24 @@ func TestFallbackRoutingRequiresExactProtocolFieldNames(t *testing.T) {
 		})
 	}
 }
+
+func TestModelRouteRequiresExactModelFieldName(t *testing.T) {
+	t.Parallel()
+
+	h := &handler{modelRoutes: map[string]upstreamRoute{
+		"nvidia/test": {upstreamURL: "https://route.example.test", upstreamBearerToken: "route-token"},
+	}}
+
+	if route, ok := h.modelRouteForBody([]byte(`{"model":"nvidia/test"}`)); !ok || route.upstreamURL != "https://route.example.test" {
+		t.Fatalf("exact model field did not select configured route: route=%#v ok=%v", route, ok)
+	}
+	for _, body := range []string{
+		`{"Model":"nvidia/test"}`,
+		`{"MODEL":"nvidia/test"}`,
+		`{"modEl":"nvidia/test"}`,
+	} {
+		if route, ok := h.modelRouteForBody([]byte(body)); ok {
+			t.Fatalf("mis-cased model field unexpectedly selected route %#v: %s", route, body)
+		}
+	}
+}
