@@ -251,10 +251,11 @@ func (h *handler) routeResponsesBody(body []byte) []byte {
 	if !ok || !responsesInputIsTextOnly(input) {
 		return body
 	}
+	required := []compatibility.Capability{compatibility.CapabilityResponses}
 	if tools, ok := object["tools"]; ok && rawJSONHasValues(tools) {
-		return body
+		required = append(required, compatibility.CapabilityToolCalling)
 	}
-	return h.routeModelBody(body, compatibility.CapabilityResponses)
+	return h.routeModelBody(body, required...)
 }
 
 func responsesInputIsTextOnly(raw json.RawMessage) bool {
