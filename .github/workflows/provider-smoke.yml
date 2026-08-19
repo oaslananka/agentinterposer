@@ -51,6 +51,7 @@ on:
           - claude-code
           - claude-code-normal
           - claude-code-normal-loop
+          - claude-code-normal-long-loop
           - claude-code-error
           - claude-code-loop
           - claude-code-long-loop
@@ -1407,7 +1408,7 @@ jobs:
           echo 'opencode_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Install Claude Code certification client
-        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-normal' || inputs.scope == 'claude-code-normal-loop' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
+        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-normal' || inputs.scope == 'claude-code-normal-loop' || inputs.scope == 'claude-code-normal-long-loop' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
         id: claude_install
         shell: bash
         run: |
@@ -1446,7 +1447,7 @@ jobs:
           echo "claude_bin=$claude_bin" >> "$GITHUB_OUTPUT"
 
       - name: Probe Claude Code Messages tool round trip
-        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-normal' || inputs.scope == 'claude-code-normal-loop' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
+        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-normal' || inputs.scope == 'claude-code-normal-loop' || inputs.scope == 'claude-code-normal-long-loop' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
         id: claude_code
         shell: bash
         env:
@@ -1506,7 +1507,7 @@ jobs:
           sudo install -d -o "$claude_user" -g "$claude_user" -m 0755 "$claude_home/.claude" "$claude_home/work"
           if [ "$SCOPE" = 'claude-code-error' ]; then
             printf '%s\n' '{"permissions":{"allow":["Bash(false)","Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
-          elif [ "$SCOPE" = 'claude-code-loop' ] || [ "$SCOPE" = 'claude-code-normal-loop' ] || [ "$SCOPE" = 'claude-code-long-loop' ]; then
+          elif [ "$SCOPE" = 'claude-code-loop' ] || [ "$SCOPE" = 'claude-code-normal-loop' ] || [ "$SCOPE" = 'claude-code-normal-long-loop' ] || [ "$SCOPE" = 'claude-code-long-loop' ]; then
             printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)","Bash(printf *)","Bash(sha256sum)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
           else
             printf '%s\n' '{"permissions":{"allow":["Bash(echo $AGENTINTERPOSER_TOOL_PROOF)"]}}' > "$RUNNER_TEMP/claude-code-settings.json"
@@ -1553,7 +1554,7 @@ jobs:
           if [ "$SCOPE" = 'claude-code-error' ]; then
             max_turns=5
             prompt=$'Use Bash exactly twice and in this exact order. First run the exact command `false`; it must fail. After you receive that failed tool result, recover by running exactly `echo $AGENTINTERPOSER_TOOL_PROOF`. The hidden proof is not present in this prompt. After the second command completes, reply with exactly its stdout and no other text.'
-          elif [ "$SCOPE" = 'claude-code-long-loop' ]; then
+          elif [ "$SCOPE" = 'claude-code-long-loop' ] || [ "$SCOPE" = 'claude-code-normal-long-loop' ]; then
             max_turns=7
             prompt=$'Use Bash exactly three times, sequentially. First run exactly `echo $AGENTINTERPOSER_TOOL_PROOF`. The hidden proof is not present in this prompt. After the first result, strip its trailing newline and run exactly `printf %s PROOF_VALUE | sha256sum`, replacing PROOF_VALUE with that literal 32-character result. After the second result, strip surrounding whitespace and run exactly `printf %s HASH_VALUE | sha256sum`, replacing HASH_VALUE with the literal 64-character hash from the second tool result. Do not use environment variables after the first command, do not combine commands, and do not run anything else. After the third command completes, reply with exactly the final 64-character SHA-256 digest and no other text.'
           elif [ "$SCOPE" = 'claude-code-loop' ] || [ "$SCOPE" = 'claude-code-normal-loop' ]; then
@@ -1563,7 +1564,7 @@ jobs:
             prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
           fi
           claude_mode_args=(--bare)
-          if [ "$SCOPE" = 'claude-code-normal' ] || [ "$SCOPE" = 'claude-code-normal-loop' ]; then
+          if [ "$SCOPE" = 'claude-code-normal' ] || [ "$SCOPE" = 'claude-code-normal-loop' ] || [ "$SCOPE" = 'claude-code-normal-long-loop' ]; then
             claude_mode_args=()
           fi
           set +e
@@ -1721,8 +1722,8 @@ jobs:
               ordered_ids = [obj.get("id") for obj in tool_uses if obj.get("id") in (error_id, success_id)]
               if ordered_ids != [error_id, success_id]:
                   raise SystemExit("Claude Code did not recover after the failing Bash tool in order")
-          elif scope in {"claude-code-loop", "claude-code-normal-loop", "claude-code-long-loop"}:
-              expected_count = 3 if scope == "claude-code-long-loop" else 2
+          elif scope in {"claude-code-loop", "claude-code-normal-loop", "claude-code-normal-long-loop", "claude-code-long-loop"}:
+              expected_count = 3 if scope in {"claude-code-long-loop", "claude-code-normal-long-loop"} else 2
               if len(tool_uses) != expected_count:
                   raise SystemExit("Claude Code dependent loop emitted an unexpected Bash tool_use count")
               second_command = f"printf %s {proof} | sha256sum"
@@ -1743,7 +1744,7 @@ jobs:
               if ordered_ids != [success_id, second_id]:
                   raise SystemExit("Claude Code did not execute the first two dependent Bash tools in order")
               final_proof = expected_hash
-              if scope == "claude-code-long-loop":
+              if scope in {"claude-code-long-loop", "claude-code-normal-long-loop"}:
                   third_command = f"printf %s {expected_hash} | sha256sum"
                   third_uses = matching_use(third_command)
                   if len(third_uses) != 1:
@@ -1772,7 +1773,7 @@ jobs:
           turns = result.get("num_turns")
           if not isinstance(turns, int):
               raise SystemExit("Claude Code completed without a numeric turn count")
-          if scope == "claude-code-long-loop":
+          if scope in {"claude-code-long-loop", "claude-code-normal-long-loop"}:
               if turns < 4 or turns > 7:
                   raise SystemExit("Claude Code long-loop certification completed with an unexpected turn count")
           elif scope in {"claude-code-error", "claude-code-loop", "claude-code-normal-loop"}:
@@ -1791,7 +1792,7 @@ jobs:
               print("claude_code_error_recovery=ok")
           elif scope in {"claude-code-loop", "claude-code-normal-loop"}:
               print("claude_code_dependent_two_tool_loop=ok")
-          elif scope == "claude-code-long-loop":
+          elif scope in {"claude-code-long-loop", "claude-code-normal-long-loop"}:
               print("claude_code_dependent_three_tool_loop=ok")
           print("claude_code_messages_streaming=ok")
           PY
@@ -1799,7 +1800,7 @@ jobs:
             echo 'claude_code_error_verified=true' >> "$GITHUB_OUTPUT"
           elif [ "$SCOPE" = 'claude-code-loop' ] || [ "$SCOPE" = 'claude-code-normal-loop' ]; then
             echo 'claude_code_loop_verified=true' >> "$GITHUB_OUTPUT"
-          elif [ "$SCOPE" = 'claude-code-long-loop' ]; then
+          elif [ "$SCOPE" = 'claude-code-long-loop' ] || [ "$SCOPE" = 'claude-code-normal-long-loop' ]; then
             echo 'claude_code_long_loop_verified=true' >> "$GITHUB_OUTPUT"
           else
             echo 'claude_code_verified=true' >> "$GITHUB_OUTPUT"
@@ -2245,6 +2246,9 @@ jobs:
             elif [ "$SCOPE" = 'claude-code-normal-loop' ]; then
               echo "- Claude Code CLI 2.1.235 normal-mode step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code normal-mode dependent two-tool Messages loop: ${CLAUDE_CODE_LOOP_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'claude-code-normal-long-loop' ]; then
+              echo "- Claude Code CLI 2.1.235 normal-mode step: ${CLAUDE_CODE_OUTCOME:-not-run}"
+              echo "- Claude Code normal-mode dependent three-tool Messages loop: ${CLAUDE_CODE_LONG_LOOP_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'claude-code-error' ]; then
               echo "- Claude Code CLI 2.1.235 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code error-result recovery: ${CLAUDE_CODE_ERROR_VERIFIED:-not-verified}"
