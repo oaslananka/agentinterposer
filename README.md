@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` and `0.148.0` over Responses for a single shell-tool round trip plus dependent two-tool and three-tool loops, and Claude Code CLI `2.1.226`, `2.1.233`, and `2.1.235` over Messages for single Bash-tool, dependent two-tool, and error-recovery flows, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. A separate randomized hosted image probe certifies base64 Messages vision input with `meta/llama-3.2-11b-vision-instruct`. These are narrow certification profiles, not claims of universal agent or model compatibility.
+> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for a single shell-tool round trip plus dependent two-tool and three-tool loops, and Codex CLI `0.148.0` for those scenarios plus a dependent four-tool loop, and Claude Code CLI `2.1.226`, `2.1.233`, and `2.1.235` over Messages for single Bash-tool, dependent two-tool, and error-recovery flows, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. A separate randomized hosted image probe certifies base64 Messages vision input with `meta/llama-3.2-11b-vision-instruct`. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -30,7 +30,7 @@ The first vertical slice supports:
 - bounded upstream concurrency (default: `3`)
 - exponential retry for `429`, `500`, `502`, `503`, and `504` responses
 - incremental flushing for `text/event-stream` responses
-- manual Codex CLI `0.147.0` and `0.148.0` certification for a Responses shell-tool round trip plus dependent two-tool and three-tool loops with `nvidia/nemotron-3-super-120b-a12b`
+- manual Codex CLI `0.147.0` certification for a Responses shell-tool round trip plus dependent two-tool and three-tool loops, and Codex CLI `0.148.0` certification for those scenarios plus a dependent four-tool loop, with `nvidia/nemotron-3-super-120b-a12b`
 - manual Claude Code CLI `2.1.226`, `2.1.233`, and `2.1.235` certification for Messages single Bash-tool, dependent two-tool, and error-recovery round trips with `nvidia/nemotron-3-super-120b-a12b`
 - randomized hosted base64-image Messages certification with `meta/llama-3.2-11b-vision-instruct`
 - configurable request-size protection (default: `32 MiB`)
@@ -173,7 +173,7 @@ curl http://127.0.0.1:11435/v1/responses \
   }'
 ```
 
-This establishes the transport needed by Responses-based clients. A daily `Provider Drift` workflow runs the lightweight hosted `baseline` probe so obvious provider drift is detected without paying the cost or accepting the flakiness of the full certification matrix on every change. The manual `Provider Smoke` workflow can run `scope=codex` for the current single shell-tool certification path, `scope=codex-loop` for a dependent two-tool path where the second shell result must be the SHA-256 digest of the first tool's unpredictable UUID output, and `scope=codex-long-loop` for a dependent three-tool path where the third result must be the SHA-256 digest of the second result. All three currently use Codex CLI `0.148.0` -> AgentInterposer -> NVIDIA hosted Responses with `nvidia/nemotron-3-super-120b-a12b`. Other Codex versions, models, broader tool surfaces, and loops beyond the current three-tool profile remain uncertified.
+This establishes the transport needed by Responses-based clients. A daily `Provider Drift` workflow runs the lightweight hosted `baseline` probe so obvious provider drift is detected without paying the cost or accepting the flakiness of the full certification matrix on every change. The manual `Provider Smoke` workflow can run `scope=codex` for the current single shell-tool certification path, `scope=codex-loop` for a dependent two-tool path where the second shell result must be the SHA-256 digest of the first tool's unpredictable UUID output, `scope=codex-long-loop` for a dependent three-tool path where the third result must be the SHA-256 digest of the second result, and `scope=codex-four-loop` for a dependent four-tool path that repeats the same unpredictable-result chaining through a fourth shell call. These scopes currently use Codex CLI `0.148.0` -> AgentInterposer -> NVIDIA hosted Responses with `nvidia/nemotron-3-super-120b-a12b`. The release hard gate intentionally remains the repeatable three-tool scope; the four-tool scope is a manual certification signal. A five-tool probe completed only two of three replicates, so five-tool and deeper loops remain uncertified rather than being inferred from the four-tool result.
 
 Send an Anthropic Messages request:
 
@@ -259,7 +259,7 @@ The manual `Provider Smoke` scope `model-route` certifies the dedicated-route me
 
 Near-term work is intentionally compatibility-first:
 
-1. Broaden Codex/Responses certification beyond the current single-tool, dependent two-tool, and dependent three-tool Nemotron 3 Super profiles to additional tool types, longer agent loops, Codex versions, and models.
+1. Broaden Codex/Responses certification beyond the current single-tool, dependent two-tool, dependent three-tool, and dependent four-tool Nemotron 3 Super profiles to additional tool types, longer agent loops, Codex versions, and models.
 2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification beyond the current single-tool, dependent two-tool, and error-recovery profiles to additional client versions, models, parallel tools, and longer multi-turn patterns.
 4. Expand the model capability registry beyond the current Nemotron 3 Super, Nemotron 3 Nano, Nemotron 3 Nano Omni, and Llama 3.2 Vision evidence sets.
