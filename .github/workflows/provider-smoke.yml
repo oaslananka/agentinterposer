@@ -1182,12 +1182,12 @@ jobs:
           set -euo pipefail
           root='/tmp/agentinterposer-claude-client'
           cache="$RUNNER_TEMP/claude-npm-cache"
-          expected_integrity='sha512-ubMVvBBlsks5NE0EmucELB2h/XZ64L86JgmMBUWShLgDAkrrzCh1zIf5qX1+SPskXAnMfKBFTMNeaT6UruxRkQ=='
+          expected_integrity='sha512-C/GxUesluZxiGGU+p3VwTQ8/fhJXdCb/mqvjhDq5TTNv9ZiONgXxy7NkhZh17VFivvv0x2X2SOMRarJQtT/Krw=='
           rm -rf "$root" "$cache"
           mkdir -p "$root" "$cache"
           chmod 0755 "$root"
 
-          package="$(cd "$root" && npm --cache "$cache" pack --ignore-scripts --silent @anthropic-ai/claude-code-linux-x64@2.1.233 | tail -1)"
+          package="$(cd "$root" && npm --cache "$cache" pack --ignore-scripts --silent @anthropic-ai/claude-code-linux-x64@2.1.235 | tail -1)"
           package_path="$root/$package"
           python3 - "$package_path" "$expected_integrity" <<'PY'
           import base64
@@ -1206,11 +1206,11 @@ jobs:
           rm -f "$package_path"
           claude_bin="$root/claude"
           version="$($claude_bin --version)"
-          if [[ "$version" != 2.1.233* ]]; then
+          if [[ "$version" != 2.1.235* ]]; then
             echo "Unexpected Claude Code version: $version" >&2
             exit 1
           fi
-          echo 'claude_code_version=2.1.233'
+          echo 'claude_code_version=2.1.235'
           echo "claude_bin=$claude_bin" >> "$GITHUB_OUTPUT"
 
       - name: Probe Claude Code Messages tool round trip
@@ -1590,11 +1590,11 @@ jobs:
           sudo install -d -m 0700 -o "$codex_user" -g "$codex_user" "$codex_home"
           sudo install -d -m 0770 -o "$codex_user" -g "$runner_gid" "$codex_run_dir"
           mkdir -p "$codex_root"
-          npm install --prefix "$codex_root" --no-audit --no-fund --silent '@openai/codex@0.147.0'
+          npm install --prefix "$codex_root" --no-audit --no-fund --silent '@openai/codex@0.148.0'
           chmod -R a+rX "$codex_root"
           codex="$codex_root/node_modules/.bin/codex"
           codex_version="$($codex --version)"
-          if [ "$codex_version" != 'codex-cli 0.147.0' ]; then
+          if [ "$codex_version" != 'codex-cli 0.148.0' ]; then
             echo "Unexpected Codex version: $codex_version" >&2
             exit 1
           fi
@@ -1742,7 +1742,7 @@ jobs:
             CODEX_HOME="$codex_home" \
             AGENTINTERPOSER_CLIENT_KEY='local-client-placeholder' \
             "$codex" --version)"
-          if [ "$isolated_version" != 'codex-cli 0.147.0' ]; then
+          if [ "$isolated_version" != 'codex-cli 0.148.0' ]; then
             echo 'Codex launcher failed under the isolated certification user.' >&2
             exit 1
           fi
@@ -1931,22 +1931,22 @@ jobs:
             echo "- Model: \`${MODEL}\`"
             echo "- Scope: ${SCOPE}"
             if [ "$SCOPE" = 'codex' ]; then
-              echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
+              echo "- Codex CLI 0.148.0 step: ${CODEX_OUTCOME:-not-run}"
               echo "- Codex Responses tool round trip: ${CODEX_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'codex-loop' ]; then
-              echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
+              echo "- Codex CLI 0.148.0 step: ${CODEX_OUTCOME:-not-run}"
               echo "- Codex dependent two-tool Responses loop: ${CODEX_LOOP_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'codex-long-loop' ]; then
-              echo "- Codex CLI 0.147.0 step: ${CODEX_OUTCOME:-not-run}"
+              echo "- Codex CLI 0.148.0 step: ${CODEX_OUTCOME:-not-run}"
               echo "- Codex dependent three-tool Responses loop: ${CODEX_LONG_LOOP_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'claude-code' ]; then
-              echo "- Claude Code CLI 2.1.233 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
+              echo "- Claude Code CLI 2.1.235 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code Messages tool round trip: ${CLAUDE_CODE_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'claude-code-error' ]; then
-              echo "- Claude Code CLI 2.1.233 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
+              echo "- Claude Code CLI 2.1.235 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code error-result recovery: ${CLAUDE_CODE_ERROR_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'claude-code-loop' ]; then
-              echo "- Claude Code CLI 2.1.233 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
+              echo "- Claude Code CLI 2.1.235 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code dependent two-tool Messages loop: ${CLAUDE_CODE_LOOP_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'models' ]; then
               echo "- Models discovery step: ${MODELS_OUTCOME:-not-run}"
