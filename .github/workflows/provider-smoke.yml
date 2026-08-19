@@ -49,6 +49,7 @@ on:
           - chat-vision-routed-fallback
           - messages-stream
           - claude-code
+          - claude-code-normal
           - claude-code-error
           - claude-code-loop
           - claude-code-long-loop
@@ -1405,7 +1406,7 @@ jobs:
           echo 'opencode_verified=true' >> "$GITHUB_OUTPUT"
 
       - name: Install Claude Code certification client
-        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
+        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-normal' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
         id: claude_install
         shell: bash
         run: |
@@ -1444,7 +1445,7 @@ jobs:
           echo "claude_bin=$claude_bin" >> "$GITHUB_OUTPUT"
 
       - name: Probe Claude Code Messages tool round trip
-        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
+        if: ${{ inputs.scope == 'claude-code' || inputs.scope == 'claude-code-normal' || inputs.scope == 'claude-code-error' || inputs.scope == 'claude-code-loop' || inputs.scope == 'claude-code-long-loop' }}
         id: claude_code
         shell: bash
         env:
@@ -1560,6 +1561,10 @@ jobs:
           else
             prompt=$'Use Bash exactly once to read the hidden certification value from the process environment. The value is not present in this prompt and your answer is invalid unless the Bash tool is called. The command string must be exactly the text between BEGIN_COMMAND and END_COMMAND.\nBEGIN_COMMAND\necho $AGENTINTERPOSER_TOOL_PROOF\nEND_COMMAND\nAfter the command completes, reply with exactly stdout and no other text.'
           fi
+          claude_mode_args=(--bare)
+          if [ "$SCOPE" = 'claude-code-normal' ]; then
+            claude_mode_args=()
+          fi
           set +e
           sudo -u "$claude_user" env -i \
             HOME="$claude_home" \
@@ -1578,7 +1583,7 @@ jobs:
             bash -c 'cd "$1" && shift && exec "$@"' bash "$claude_home/work" \
             timeout 180s "$CLAUDE_BIN" \
               -p "$prompt" \
-              --bare \
+              "${claude_mode_args[@]}" \
               --no-session-persistence \
               --tools 'Bash' \
               --permission-mode default \
@@ -2233,6 +2238,9 @@ jobs:
             elif [ "$SCOPE" = 'claude-code' ]; then
               echo "- Claude Code CLI 2.1.235 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code Messages tool round trip: ${CLAUDE_CODE_VERIFIED:-not-verified}"
+            elif [ "$SCOPE" = 'claude-code-normal' ]; then
+              echo "- Claude Code CLI 2.1.235 normal-mode step: ${CLAUDE_CODE_OUTCOME:-not-run}"
+              echo "- Claude Code normal-mode Messages tool round trip: ${CLAUDE_CODE_VERIFIED:-not-verified}"
             elif [ "$SCOPE" = 'claude-code-error' ]; then
               echo "- Claude Code CLI 2.1.235 step: ${CLAUDE_CODE_OUTCOME:-not-run}"
               echo "- Claude Code error-result recovery: ${CLAUDE_CODE_ERROR_VERIFIED:-not-verified}"

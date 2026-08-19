@@ -679,6 +679,13 @@ func validateToolResultSequence(pendingToolUses map[string]string, messageRole s
 
 func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, map[string]string, error) {
 	toolNames := make(map[string]string)
+	if message.Role == "system" {
+		text, err := decodeTextContent(message.Content, "system message")
+		if err != nil {
+			return nil, nil, err
+		}
+		return []chatMessage{{Role: "system", Content: text}}, toolNames, nil
+	}
 	if message.Role != "user" && message.Role != "assistant" {
 		return nil, nil, fmt.Errorf("unsupported message role %q", message.Role)
 	}

@@ -1371,3 +1371,64 @@ func TestDecodeAnthropicMessagesRequestRejectsMisCasedProtocolFields(t *testing.
 		}
 	}
 }
+
+func TestHandlerPreservesMidConversationSystemMessageOrder(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-mid-system","model":"nvidia/test","choices":[{"index":0,"message":{"role":"assistant","content":"BLUE"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13}}`))
+	}))
+	defer upstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         upstream.URL,
+		UpstreamBearerToken: "server-secret",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	const body = `{"model":"nvidia/test","max_tokens":32,"system":"Initial policy.","messages":[{"role":"user","content":"Remember BLUE."},{"role":"system","content":"Reply only with the remembered word."},{"role":"user","content":"Answer now."}]}`
+	response := serveMessages(handler, body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	messages, ok := gotRequest["messages"].([]any)
+	if !ok || len(messages) != 4 {
+		t.Fatalf("upstream messages = %#v, want top-level system plus user/system/user", gotRequest["messages"])
+	}
+	assertMessageRoleContent(t, messages[0], "system", "Initial policy.")
+	assertMessageRoleContent(t, messages[1], "user", "Remember BLUE.")
+	assertMessageRoleContent(t, messages[2], "system", "Reply only with the remembered word.")
+	assertMessageRoleContent(t, messages[3], "user", "Answer now.")
+}
+
+func TestHandlerRejectsNonTextMidConversationSystemMessage(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	handler := newMessagesTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	const body = `{"model":"nvidia/test","max_tokens":32,"messages":[{"role":"user","content":"hello"},{"role":"system","content":[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]}]}`
+	response := serveMessages(handler, body)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls.Load())
+	}
+	if !strings.Contains(response.Body.String(), "unsupported system message content block") {
+		t.Fatalf("body = %s, want fail-closed system content error", response.Body.String())
+	}
+}
