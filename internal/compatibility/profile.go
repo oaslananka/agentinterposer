@@ -10,11 +10,13 @@ const (
 	CapabilityToolCalling     Capability = "tool_calling"
 	CapabilityVisionInput     Capability = "vision_input"
 
-	certifiedCodexClient             = "codex"
-	certifiedCodexVersion            = "0.147.0"
-	certifiedClaudeCodeClient        = "claude-code"
-	certifiedClaudeCodeVersion       = "2.1.226"
-	certifiedClaudeCodeLatestVersion = "2.1.233"
+	certifiedCodexClient               = "codex"
+	certifiedCodexVersion              = "0.147.0"
+	certifiedCodexLatestVersion        = "0.148.0"
+	certifiedClaudeCodeClient          = "claude-code"
+	certifiedClaudeCodeVersion         = "2.1.226"
+	certifiedClaudeCodePreviousVersion = "2.1.233"
+	certifiedClaudeCodeLatestVersion   = "2.1.235"
 )
 
 type Certification struct {
@@ -80,9 +82,15 @@ var builtinProfiles = map[string]Profile{
 			{Client: certifiedCodexClient, Version: certifiedCodexVersion, Scenario: "single-tool"},
 			{Client: certifiedCodexClient, Version: certifiedCodexVersion, Scenario: "dependent-tool-loop"},
 			{Client: certifiedCodexClient, Version: certifiedCodexVersion, Scenario: "dependent-three-tool-loop"},
+			{Client: certifiedCodexClient, Version: certifiedCodexLatestVersion, Scenario: "single-tool"},
+			{Client: certifiedCodexClient, Version: certifiedCodexLatestVersion, Scenario: "dependent-tool-loop"},
+			{Client: certifiedCodexClient, Version: certifiedCodexLatestVersion, Scenario: "dependent-three-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "single-tool"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "dependent-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeVersion, Scenario: "error-recovery"},
+			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodePreviousVersion, Scenario: "single-tool"},
+			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodePreviousVersion, Scenario: "dependent-tool-loop"},
+			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodePreviousVersion, Scenario: "error-recovery"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "single-tool"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "dependent-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "error-recovery"},
