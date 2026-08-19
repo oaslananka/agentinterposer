@@ -122,6 +122,47 @@ func TestSelectModelCanUseNemotronOmniForVision(t *testing.T) {
 	}
 }
 
+func TestLookupCertifiedNemotron35LightningProfile(t *testing.T) {
+	t.Parallel()
+
+	profile, ok := Lookup("nvidia/nemotron-3.5-lightning-30b-a3b")
+	if !ok {
+		t.Fatal("Lookup() did not return the certified Nemotron 3.5 Lightning profile")
+	}
+	if !profile.Supports(CapabilityChatCompletions) {
+		t.Fatal("Nemotron 3.5 Lightning profile must assert Chat Completions support")
+	}
+	for _, capability := range []Capability{CapabilityResponses, CapabilityToolCalling, CapabilityVisionInput} {
+		if profile.Supports(capability) {
+			t.Fatalf("Nemotron 3.5 Lightning profile must not assert uncertified %q support", capability)
+		}
+	}
+	if len(profile.Certifications) != 0 {
+		t.Fatalf("Nemotron 3.5 Lightning client certifications = %#v, want none", profile.Certifications)
+	}
+}
+
+func TestLookupCertifiedNemotron3UltraProfile(t *testing.T) {
+	t.Parallel()
+
+	profile, ok := Lookup("nvidia/nemotron-3-ultra-550b-a55b")
+	if !ok {
+		t.Fatal("Lookup() did not return the certified Nemotron 3 Ultra profile")
+	}
+	for _, capability := range []Capability{CapabilityChatCompletions, CapabilityResponses, CapabilityToolCalling} {
+		if !profile.Supports(capability) {
+			t.Fatalf("Nemotron 3 Ultra profile must assert %q support", capability)
+		}
+	}
+	if profile.Supports(CapabilityVisionInput) {
+		t.Fatal("Nemotron 3 Ultra profile must not assert uncertified vision input support")
+	}
+	want := Certification{Client: "codex", Version: "0.148.0", Scenario: "single-tool"}
+	if len(profile.Certifications) != 1 || profile.Certifications[0] != want {
+		t.Fatalf("Nemotron 3 Ultra certifications = %#v, want %#v", profile.Certifications, []Certification{want})
+	}
+}
+
 func TestLookupUnknownModelDoesNotAssumeCapabilities(t *testing.T) {
 	t.Parallel()
 
