@@ -205,7 +205,7 @@ func TestRunCapabilitiesCommandPrintsCertifiedProfileJSON(t *testing.T) {
 	if len(payload.Capabilities) != 3 {
 		t.Fatalf("capabilities = %#v", payload.Capabilities)
 	}
-	if len(payload.Certifications) != 19 {
+	if len(payload.Certifications) != 20 {
 		t.Fatalf("certifications = %#v", payload.Certifications)
 	}
 }

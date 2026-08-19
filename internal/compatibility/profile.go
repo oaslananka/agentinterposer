@@ -114,6 +114,7 @@ var builtinProfiles = map[string]Profile{
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodePreviousVersion, Scenario: "error-recovery"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "single-tool"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "normal-mode-single-tool"},
+			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "normal-mode-dependent-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "dependent-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "dependent-three-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "error-recovery"},
