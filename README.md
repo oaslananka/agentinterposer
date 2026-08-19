@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** early development. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for a single shell-tool round trip plus dependent two-tool and three-tool loops, and Codex CLI `0.148.0` for those scenarios plus a dependent four-tool loop, and Claude Code CLI `2.1.226` and `2.1.233` over Messages for single Bash-tool, dependent two-tool, and error-recovery flows, plus Claude Code CLI `2.1.235` for those scenarios and a dependent three-tool loop, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. A separate randomized hosted image probe certifies base64 Messages vision input with `meta/llama-3.2-11b-vision-instruct`. These are narrow certification profiles, not claims of universal agent or model compatibility.
+> **Status:** pre-1.0 hardening. The v1 compatibility boundary is defined below; remaining v1 work is verification and defect closure rather than requiring every provider, client, or upstream API feature. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for a single shell-tool round trip plus dependent two-tool and three-tool loops, and Codex CLI `0.148.0` for those scenarios plus a dependent four-tool loop, and Claude Code CLI `2.1.226` and `2.1.233` over Messages for single Bash-tool, dependent two-tool, and error-recovery flows, plus Claude Code CLI `2.1.235` for those scenarios and a dependent three-tool loop, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. A separate randomized hosted image probe certifies base64 Messages vision input with `meta/llama-3.2-11b-vision-instruct`. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -18,7 +18,7 @@ The project is designed around three principles:
 
 ## Current capabilities
 
-The first vertical slice supports:
+The current v1 target slice supports:
 
 - `GET /healthz`
 - `GET /v1/models` for upstream model discovery
@@ -37,6 +37,33 @@ The first vertical slice supports:
 - safe loopback binding by default (`127.0.0.1:11435`)
 
 The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com`. AgentInterposer uses native upstream Responses support when the provider exposes it instead of translating Responses payloads into Chat Completions.
+
+## V1 compatibility contract
+
+AgentInterposer v1 is intentionally a **local-first, evidence-backed compatibility gateway**, not a promise to emulate every OpenAI or Anthropic API feature. The boundary below is the target stable contract for `v1.0.0`; the project remains pre-1.0 until the final readiness and release acceptance gates pass. Features outside this boundary may be added later without being prerequisites for v1.
+
+| Surface | V1 contract |
+| --- | --- |
+| HTTP endpoints | `GET /healthz`, `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`, and `POST /v1/messages` remain the public gateway surface. |
+| Chat Completions / Responses | OpenAI-compatible requests and responses are native upstream passthrough. AgentInterposer adds auth isolation, concurrency/retry/timeout controls, request-size protection, streaming flush behavior, and optional evidence-based model routing; it does not normalize arbitrary provider-specific JSON into a universal schema. |
+| Anthropic Messages | `POST /v1/messages` implements the documented `anthropic-version: 2023-06-01` subset: text, base64/HTTP(S)-URL user images, custom client tools/tool choice/tool use, text tool results (including failed tool-result preservation), and text/custom-tool SSE streaming. Unknown or unsupported semantics fail closed rather than being silently dropped. |
+| Routing | Capability fallback selects only positively certified model profiles. Unknown requested models are not rewritten. A routed request changes only the exact top-level `model`; provider-specific fields are preserved. Per-model routes are operator configuration and do not themselves create compatibility certification. |
+| Reliability bounds | Request bodies are bounded (32 MiB by default); Messages non-streaming upstream bodies and raw upstream SSE frames are capped at 32 MiB. Upstream response-header and body-idle waits are bounded, active stream progress resets the idle deadline, retry drains are bounded, and downstream cancellation propagates upstream. |
+| Security boundary | The default listener is loopback-only. AgentInterposer owns upstream bearer credentials and never forwards client `Authorization`/`x-api-key` values upstream. AgentInterposer does not authenticate clients in v1; non-loopback use therefore requires the explicit remote opt-in plus an external authentication/network boundary. |
+| Compatibility evidence | Built-in model capabilities and client/version/scenario certifications are positive evidence snapshots. Missing evidence means **uncertified/unknown**, not universally unsupported. External provider/model behavior may drift independently of the gateway. |
+| Stability | Within the v1 line, documented supported behavior is intended to remain backward-compatible. Validation may become stricter when required to fix a security or protocol-safety defect; unsupported or uncertified areas may be added later without weakening the fail-closed contract. |
+
+### Explicitly unsupported in the v1 Messages adapter
+
+The following are outside the v1 Messages translation contract and are rejected rather than approximated: `stop_sequences`, `top_k`, `service_tier`, cache-only `max_tokens=0`, unsupported top-level fields such as `cache_control`, `container`, `inference_geo`, `output_config`, and `anthropic-user-profile-id`, Files API `file_id` image sources, image-bearing `tool_result` blocks, thinking blocks, and server tools. The four tolerated `anthropic-beta` compatibility markers are transport/client compatibility inputs only; accepting a marker does not implement broader beta-only semantics.
+
+For `/v1/responses`, AgentInterposer v1 keeps native upstream passthrough. The **fallback router** is deliberately narrower: it automatically reroutes only direct-string or structured `input_text` requests with no tools. `input_image`, `input_file`, non-message items, and tool-bearing Responses requests are not translated or fallback-routed; a provider may still support them natively, but they are outside AgentInterposer's certified fallback contract.
+
+### Uncertified is not unsupported
+
+The following are deliberately not v1 blockers and must not be inferred from nearby successful certifications: Codex dependent five-tool-or-deeper loops, Claude Code same-turn parallel tool use, end-to-end OpenCode/Continue compatibility beyond their connection helpers, compatibility with a second external provider, uncertified client versions/models, and multimodal/tool-bearing Responses fallback. These areas remain candidates for later evidence-backed expansion.
+
+The release certification chain intentionally uses the more repeatable dependent three-tool Codex scope and dependent two-tool Claude Code scope. Deeper successful manual certifications remain additional evidence rather than making the release gate more fragile.
 
 ### Compatibility profiles
 
@@ -60,6 +87,7 @@ Coding agent / OpenAI-compatible client
                  | GET  /v1/models
                  | POST /v1/chat/completions
                  | POST /v1/responses
+                 | POST /v1/messages
                  v
           AgentInterposer
           127.0.0.1:11435
@@ -72,7 +100,7 @@ Coding agent / OpenAI-compatible client
         (NVIDIA by default)
 ```
 
-OpenAI Responses uses native passthrough through the same reliability core. The Anthropic Messages path translates text, base64 and URL user image inputs, and custom client-tool requests to OpenAI-compatible Chat Completions when the selected upstream does not expose a usable hosted `/v1/messages` endpoint. The endpoint requires `anthropic-version: 2023-06-01`; missing or different API versions are rejected rather than being interpreted under the wrong contract. Base64 image blocks are mapped to OpenAI-compatible `image_url` content parts using `data:` URLs, while URL image sources are forwarded as validated absolute HTTP(S) image URLs; surrounding text-part order is preserved. Text deltas are flushed as Anthropic SSE events. Streaming tool-call arguments are buffered until they form valid JSON, then emitted as a `tool_use` block with `input_json_delta`. Files API image sources, image-bearing tool results, thinking blocks, and broader Anthropic-specific features remain outside this adapter slice.
+OpenAI Responses uses native passthrough through the same reliability core. The Anthropic Messages path is an explicit adapter: it translates the documented text, base64 and URL user image, and custom client-tool subset to OpenAI-compatible Chat Completions rather than proxying an upstream `/v1/messages` endpoint. The endpoint requires `anthropic-version: 2023-06-01`; missing or different API versions are rejected rather than being interpreted under the wrong contract. Base64 image blocks are mapped to OpenAI-compatible `image_url` content parts using `data:` URLs, while URL image sources are forwarded as validated absolute HTTP(S) image URLs; surrounding text-part order is preserved. Text deltas are flushed as Anthropic SSE events. Streaming tool-call arguments are buffered until they form valid JSON, then emitted as a `tool_use` block with `input_json_delta`. Files API image sources, image-bearing tool results, thinking blocks, and broader Anthropic-specific features remain outside this adapter slice.
 
 ## Quick start
 
@@ -257,7 +285,7 @@ The manual `Provider Smoke` scope `model-route` certifies the dedicated-route me
 
 ## Roadmap
 
-Near-term work is intentionally compatibility-first:
+The v1 boundary above is intentionally narrower than the long-term roadmap. The following are post-v1 compatibility-breadth opportunities, not prerequisites for declaring the documented v1 contract complete:
 
 1. Broaden Codex/Responses certification beyond the current single-tool, dependent two-tool, dependent three-tool, and dependent four-tool Nemotron 3 Super profiles to additional tool types, longer agent loops, Codex versions, and models.
 2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.

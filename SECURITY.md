@@ -2,7 +2,15 @@
 
 ## Supported versions
 
-AgentInterposer is pre-1.0 software. Security fixes are applied to the latest code on the default branch and to the newest release when releases begin.
+AgentInterposer is still pre-1.0 until the final v1 readiness gates pass, but published releases are already immutable and actively maintained. Security work targets the default branch and the newest published release; older releases do not receive guaranteed backports.
+
+| Version | Security support |
+| --- | --- |
+| `main` | Yes |
+| Latest published release | Yes |
+| Older releases | No guaranteed backports |
+
+Once `v1.0.0` is published, the documented v1 compatibility boundary in `README.md` is the stable public contract for the v1 line. Security fixes may tighten validation or disable unsafe behavior when necessary to address a vulnerability; such changes should be documented in the corresponding release.
 
 ## Reporting a vulnerability
 
