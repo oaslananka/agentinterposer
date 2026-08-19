@@ -58,11 +58,11 @@ AgentInterposer v1 is intentionally a **local-first, evidence-backed compatibili
 
 The following are outside the v1 Messages translation contract and are rejected rather than approximated: `stop_sequences`, `top_k`, `service_tier`, cache-only `max_tokens=0`, unsupported top-level fields such as `cache_control`, `container`, `inference_geo`, `output_config`, and `anthropic-user-profile-id`, Files API `file_id` image sources, image-bearing `tool_result` blocks, thinking blocks, and server tools. The four tolerated `anthropic-beta` compatibility markers are transport/client compatibility inputs only; accepting a marker does not implement broader beta-only semantics.
 
-For `/v1/responses`, AgentInterposer v1 keeps native upstream passthrough. The **fallback router** is deliberately narrower: it automatically reroutes only direct-string or structured `input_text` requests with no tools. `input_image`, `input_file`, non-message items, and tool-bearing Responses requests are not translated or fallback-routed; a provider may still support them natively, but they are outside AgentInterposer's certified fallback contract.
+For `/v1/responses`, AgentInterposer v1 keeps native upstream passthrough. The **fallback router** is deliberately narrower: it automatically reroutes direct-string or structured `input_text` requests, and tool-bearing text requests only when the selected fallback positively asserts both native Responses and tool calling. `input_image`, `input_file`, and non-message items are not translated or fallback-routed; a provider may still support them natively, but they are outside AgentInterposer's certified fallback contract.
 
 ### Uncertified is not unsupported
 
-The following are deliberately not v1 blockers and must not be inferred from nearby successful certifications: Codex dependent five-tool-or-deeper loops, Claude Code same-turn parallel tool use, OpenCode behavior beyond the exact certified `1.18.18` dependent two-tool scenario, end-to-end Continue compatibility beyond its connection helper, compatibility with a second external provider, uncertified client versions/models, and multimodal/tool-bearing Responses fallback. These areas remain candidates for later evidence-backed expansion.
+The following are deliberately not v1 blockers and must not be inferred from nearby successful certifications: Codex dependent five-tool-or-deeper loops, Claude Code same-turn parallel tool use, OpenCode behavior beyond the exact certified `1.18.18` dependent two-tool scenario, end-to-end Continue compatibility beyond its connection helper, compatibility with a second external provider, uncertified client versions/models, and multimodal Responses fallback. These areas remain candidates for later evidence-backed expansion.
 
 The release certification chain intentionally uses the more repeatable dependent three-tool Codex scope and dependent two-tool Claude Code scope. Deeper successful manual certifications remain additional evidence rather than making the release gate more fragile.
 
@@ -291,10 +291,10 @@ The manual `Provider Smoke` scope `model-route` certifies the dedicated-route me
 The v1 boundary above is intentionally narrower than the long-term roadmap. The following are post-v1 compatibility-breadth opportunities, not prerequisites for declaring the documented v1 contract complete:
 
 1. Broaden Codex/Responses certification beyond the current single-tool, dependent two-tool, dependent three-tool, and dependent four-tool Nemotron 3 Super profiles to additional tool types, longer agent loops, Codex versions, and models.
-2. Broaden the Anthropic Messages adapter beyond the current text/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
+2. Broaden the Anthropic Messages adapter beyond the current text/system/base64-and-URL-image/custom-client-tool slice, including Files API image sources, image-bearing tool results, thinking, and richer non-text result semantics.
 3. Broaden Claude Code/Messages certification beyond the current bare-mode single-tool/dependent two-tool/dependent three-tool/error-recovery profiles and the normal-mode single-tool profile to additional normal-mode loops, client versions, models, parallel tools, and longer multi-turn patterns.
-4. Expand the model capability registry beyond the current Nemotron 3 Super, Nemotron 3 Nano, Nemotron 3 Nano Omni, and Llama 3.2 Vision evidence sets.
-5. Certify per-model upstream routes against additional providers and expand fallback coverage to multimodal/tool-bearing Responses.
+4. Expand the model capability registry beyond the current evidence-backed Nemotron 3 Super, Nemotron 3 Ultra, Nemotron 3.5 Lightning, Nemotron 3 Nano, Nemotron 3 Nano Omni, and Llama 3.2 Vision profiles.
+5. Certify per-model upstream routes against additional providers and expand fallback coverage to multimodal and broader tool-bearing Responses.
 6. Expand the certified Codex, Claude Code, and OpenCode client profiles and the existing Continue connection helper to additional compatible IDE clients; Continue end-to-end behavior remains uncertified until it is repeatable.
 
 ## Releases
