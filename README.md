@@ -4,7 +4,7 @@
 
 AgentInterposer is a local-first compatibility gateway between coding agents and LLM providers.
 
-> **Status:** pre-1.0 hardening. The v1 compatibility boundary is defined below; remaining v1 work is verification and defect closure rather than requiring every provider, client, or upstream API feature. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for a single shell-tool round trip plus dependent two-tool and three-tool loops, and Codex CLI `0.148.0` for those scenarios plus a dependent four-tool loop, and Claude Code CLI `2.1.226` and `2.1.233` over Messages for single Bash-tool, dependent two-tool, and error-recovery flows, plus Claude Code CLI `2.1.235` for those scenarios and a dependent three-tool loop, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. A separate randomized hosted image probe certifies base64 Messages vision input with `meta/llama-3.2-11b-vision-instruct`. These are narrow certification profiles, not claims of universal agent or model compatibility.
+> **Status:** stable v1. The compatibility boundary below is the supported v1 contract; compatibility breadth outside that boundary remains evidence-driven and may expand in later releases. The current foundation provides hardened OpenAI-compatible Chat Completions, native Responses passthrough, and an Anthropic Messages adapter for text, base64 and URL user image inputs, and custom client tools in both non-streaming and SSE streaming modes. Manual compatibility probes verify Codex CLI `0.147.0` over Responses for a single shell-tool round trip plus dependent two-tool and three-tool loops, and Codex CLI `0.148.0` for those scenarios plus a dependent four-tool loop, and Claude Code CLI `2.1.226` and `2.1.233` over Messages for single Bash-tool, dependent two-tool, and error-recovery flows, plus Claude Code CLI `2.1.235` for those scenarios and a dependent three-tool loop, with `nvidia/nemotron-3-super-120b-a12b` through AgentInterposer. A separate randomized hosted image probe certifies base64 Messages vision input with `meta/llama-3.2-11b-vision-instruct`. These are narrow certification profiles, not claims of universal agent or model compatibility.
 
 ## Why AgentInterposer?
 
@@ -18,7 +18,7 @@ The project is designed around three principles:
 
 ## Current capabilities
 
-The current v1 target slice supports:
+The v1 slice supports:
 
 - `GET /healthz`
 - `GET /v1/models` for upstream model discovery
@@ -40,7 +40,7 @@ The default upstream is NVIDIA's hosted API at `https://integrate.api.nvidia.com
 
 ## V1 compatibility contract
 
-AgentInterposer v1 is intentionally a **local-first, evidence-backed compatibility gateway**, not a promise to emulate every OpenAI or Anthropic API feature. The boundary below is the target stable contract for `v1.0.0`; the project remains pre-1.0 until the final readiness and release acceptance gates pass. Features outside this boundary may be added later without being prerequisites for v1.
+AgentInterposer v1 is intentionally a **local-first, evidence-backed compatibility gateway**, not a promise to emulate every OpenAI or Anthropic API feature. The boundary below is the stable public contract for the v1 line. Features outside this boundary may be added later without weakening the documented supported behavior.
 
 | Surface | V1 contract |
 | --- | --- |
