@@ -17,6 +17,8 @@ const (
 	certifiedClaudeCodeVersion         = "2.1.226"
 	certifiedClaudeCodePreviousVersion = "2.1.233"
 	certifiedClaudeCodeLatestVersion   = "2.1.235"
+	certifiedOpenCodeClient            = "opencode"
+	certifiedOpenCodeVersion           = "1.18.18"
 )
 
 type Certification struct {
@@ -96,6 +98,7 @@ var builtinProfiles = map[string]Profile{
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "dependent-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "dependent-three-tool-loop"},
 			{Client: certifiedClaudeCodeClient, Version: certifiedClaudeCodeLatestVersion, Scenario: "error-recovery"},
+			{Client: certifiedOpenCodeClient, Version: certifiedOpenCodeVersion, Scenario: "dependent-tool-loop"},
 		},
 	},
 }

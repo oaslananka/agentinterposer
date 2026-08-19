@@ -156,6 +156,7 @@ func TestKnownNemotronCertificationsMatchHostedSmokeContracts(t *testing.T) {
 		{Client: "claude-code", Version: "2.1.235", Scenario: "dependent-tool-loop"}:       false,
 		{Client: "claude-code", Version: "2.1.235", Scenario: "dependent-three-tool-loop"}: false,
 		{Client: "claude-code", Version: "2.1.235", Scenario: "error-recovery"}:            false,
+		{Client: "opencode", Version: "1.18.18", Scenario: "dependent-tool-loop"}:          false,
 	}
 	for _, certification := range profile.Certifications {
 		if _, exists := want[certification]; exists {
