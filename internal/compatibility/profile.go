@@ -49,6 +49,24 @@ func (p Profile) Capabilities() []Capability {
 }
 
 var builtinProfiles = map[string]Profile{
+	"nvidia/nemotron-3.5-lightning-30b-a3b": {
+		Model: "nvidia/nemotron-3.5-lightning-30b-a3b",
+		capabilities: map[Capability]bool{
+			CapabilityChatCompletions: true,
+		},
+		Certifications: []Certification{},
+	},
+	"nvidia/nemotron-3-ultra-550b-a55b": {
+		Model: "nvidia/nemotron-3-ultra-550b-a55b",
+		capabilities: map[Capability]bool{
+			CapabilityChatCompletions: true,
+			CapabilityResponses:       true,
+			CapabilityToolCalling:     true,
+		},
+		Certifications: []Certification{
+			{Client: certifiedCodexClient, Version: certifiedCodexLatestVersion, Scenario: "single-tool"},
+		},
+	},
 	"meta/llama-3.2-11b-vision-instruct": {
 		Model: "meta/llama-3.2-11b-vision-instruct",
 		capabilities: map[Capability]bool{
