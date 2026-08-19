@@ -194,6 +194,7 @@ func TestKnownNemotronCertificationsMatchHostedSmokeContracts(t *testing.T) {
 		{Client: "claude-code", Version: "2.1.233", Scenario: "dependent-tool-loop"}:       false,
 		{Client: "claude-code", Version: "2.1.233", Scenario: "error-recovery"}:            false,
 		{Client: "claude-code", Version: "2.1.235", Scenario: "single-tool"}:               false,
+		{Client: "claude-code", Version: "2.1.235", Scenario: "normal-mode-single-tool"}:   false,
 		{Client: "claude-code", Version: "2.1.235", Scenario: "dependent-tool-loop"}:       false,
 		{Client: "claude-code", Version: "2.1.235", Scenario: "dependent-three-tool-loop"}: false,
 		{Client: "claude-code", Version: "2.1.235", Scenario: "error-recovery"}:            false,

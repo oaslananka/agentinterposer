@@ -46,6 +46,10 @@ func TestRenderClaudeCodeEnvUsesMessagesGateway(t *testing.T) {
 		`export ANTHROPIC_AUTH_TOKEN='agentinterposer-local-placeholder'`,
 		`export ANTHROPIC_MODEL='nvidia/nemotron-3-super-120b-a12b'`,
 		`export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS='1'`,
+		`export CLAUDE_CODE_DISABLE_THINKING='1'`,
+		`export CLAUDE_CODE_EFFORT_LEVEL='auto'`,
+		`export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1'`,
+		`export CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK='1'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Claude Code environment missing %q:\n%s", want, got)

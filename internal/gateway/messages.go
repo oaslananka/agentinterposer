@@ -545,6 +545,9 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	if len(request.StopSequences) > 0 {
 		return chatCompletionRequest{}, errors.New("stop_sequences are not supported by the Messages adapter yet")
 	}
+	if err := validateMidConversationSystemPlacement(request.Messages); err != nil {
+		return chatCompletionRequest{}, err
+	}
 
 	translated := chatCompletionRequest{
 		Model:       request.Model,
@@ -646,6 +649,25 @@ func translateAnthropicRequest(request anthropicMessagesRequest) (chatCompletion
 	return translated, nil
 }
 
+func validateMidConversationSystemPlacement(messages []anthropicInputMessage) error {
+	for i := 0; i < len(messages); i++ {
+		if messages[i].Role != "system" {
+			continue
+		}
+
+		if i == 0 || messages[i-1].Role != "user" {
+			return errors.New("system message section must immediately follow a user message")
+		}
+		for i+1 < len(messages) && messages[i+1].Role == "system" {
+			i++
+		}
+		if i+1 < len(messages) && messages[i+1].Role != "assistant" {
+			return errors.New("system message section must be last or immediately followed by an assistant message")
+		}
+	}
+	return nil
+}
+
 func validateToolResultSequence(pendingToolUses map[string]string, messageRole string, messages []chatMessage) error {
 	resultIDs := make([]string, 0)
 	for _, message := range messages {
@@ -679,6 +701,13 @@ func validateToolResultSequence(pendingToolUses map[string]string, messageRole s
 
 func translateAnthropicMessage(message anthropicInputMessage) ([]chatMessage, map[string]string, error) {
 	toolNames := make(map[string]string)
+	if message.Role == "system" {
+		text, err := decodeTextContent(message.Content, "system message")
+		if err != nil {
+			return nil, nil, err
+		}
+		return []chatMessage{{Role: "system", Content: text}}, toolNames, nil
+	}
 	if message.Role != "user" && message.Role != "assistant" {
 		return nil, nil, fmt.Errorf("unsupported message role %q", message.Role)
 	}
