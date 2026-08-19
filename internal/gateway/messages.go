@@ -235,6 +235,131 @@ func ensureAnthropicRequestID(w http.ResponseWriter) string {
 	return requestID
 }
 
+func validateExactJSONKeyCasing(raw json.RawMessage, known ...string) (map[string]json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, nil
+	}
+	for key := range object {
+		for _, exact := range known {
+			if key != exact && strings.EqualFold(key, exact) {
+				return nil, fmt.Errorf("json: unknown field %q", key)
+			}
+		}
+	}
+	return object, nil
+}
+
+func validateAnthropicRequestKeyCasing(body []byte) error {
+	object, err := validateExactJSONKeyCasing(body,
+		"model", "max_tokens", "metadata", "messages", "system", "stream",
+		"temperature", "top_k", "top_p", "service_tier", "stop_sequences",
+		"tools", "tool_choice", "thinking",
+	)
+	if err != nil || object == nil {
+		return err
+	}
+	if raw, ok := object["metadata"]; ok {
+		if _, err := validateExactJSONKeyCasing(raw, "user_id"); err != nil {
+			return err
+		}
+	}
+	if raw, ok := object["messages"]; ok {
+		var messages []json.RawMessage
+		if json.Unmarshal(raw, &messages) == nil {
+			for _, rawMessage := range messages {
+				message, err := validateExactJSONKeyCasing(rawMessage, "role", "content")
+				if err != nil {
+					return err
+				}
+				if content, ok := message["content"]; ok {
+					if err := validateAnthropicContentBlocksKeyCasing(content); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	if raw, ok := object["system"]; ok {
+		if err := validateAnthropicContentBlocksKeyCasing(raw); err != nil {
+			return err
+		}
+	}
+	if raw, ok := object["tools"]; ok {
+		var tools []json.RawMessage
+		if json.Unmarshal(raw, &tools) == nil {
+			for _, rawTool := range tools {
+				tool, err := validateExactJSONKeyCasing(rawTool, "type", "name", "description", "input_schema", "strict", "cache_control")
+				if err != nil {
+					return err
+				}
+				if cacheControl, ok := tool["cache_control"]; ok {
+					if _, err := validateExactJSONKeyCasing(cacheControl, "type", "ttl"); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	if raw, ok := object["tool_choice"]; ok {
+		if _, err := validateExactJSONKeyCasing(raw, "type", "name", "disable_parallel_tool_use"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAnthropicContentBlocksKeyCasing(raw json.RawMessage) error {
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil
+	}
+	for _, rawBlock := range blocks {
+		block, err := validateExactJSONKeyCasing(rawBlock,
+			"type", "cache_control", "text", "citations", "source", "id", "name",
+			"input", "caller", "tool_use_id", "content", "is_error",
+		)
+		if err != nil {
+			return err
+		}
+		if cacheControl, ok := block["cache_control"]; ok {
+			if _, err := validateExactJSONKeyCasing(cacheControl, "type", "ttl"); err != nil {
+				return err
+			}
+		}
+		if source, ok := block["source"]; ok {
+			if _, err := validateExactJSONKeyCasing(source, "type", "media_type", "data", "url", "file_id"); err != nil {
+				return err
+			}
+		}
+		if caller, ok := block["caller"]; ok {
+			if _, err := validateExactJSONKeyCasing(caller, "type", "tool_id"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func decodeAnthropicMessagesRequest(body []byte) (anthropicMessagesRequest, error) {
+	if err := validateAnthropicRequestKeyCasing(body); err != nil {
+		return anthropicMessagesRequest{}, err
+	}
+	var request anthropicMessagesRequest
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return anthropicMessagesRequest{}, fmt.Errorf("invalid JSON request body: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return anthropicMessagesRequest{}, errors.New("invalid JSON request body: trailing JSON value")
+	}
+	if len(bytes.TrimSpace(request.Thinking)) > 0 && string(bytes.TrimSpace(request.Thinking)) != "null" {
+		return anthropicMessagesRequest{}, errors.New("thinking is not supported by the Messages adapter yet")
+	}
+	return request, nil
+}
+
 func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	ensureAnthropicRequestID(w)
 	if h.upstreamURL == "" {
@@ -271,19 +396,9 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var request anthropicMessagesRequest
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON request body: "+err.Error())
-		return
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON request body: trailing JSON value")
-		return
-	}
-	if len(bytes.TrimSpace(request.Thinking)) > 0 && string(bytes.TrimSpace(request.Thinking)) != "null" {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "thinking is not supported by the Messages adapter yet")
+	request, err := decodeAnthropicMessagesRequest(body)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 
@@ -832,6 +947,9 @@ func validateAnthropicCacheControl(cacheControl *anthropicCacheControl) error {
 }
 
 func decodeAnthropicContentBlocks(raw json.RawMessage) ([]anthropicContentBlock, error) {
+	if err := validateAnthropicContentBlocksKeyCasing(raw); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var blocks []anthropicContentBlock

@@ -214,10 +214,24 @@ func (h *handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	writeUpstreamResponse(w, upstreamResponse, err)
 }
 
-type responsesRoutingRequest struct {
-	Model string          `json:"model"`
-	Input json.RawMessage `json:"input"`
-	Tools json.RawMessage `json:"tools"`
+func decodeRoutingObject(raw []byte) (map[string]json.RawMessage, bool) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, false
+	}
+	return object, true
+}
+
+func routingStringField(object map[string]json.RawMessage, key string) (string, bool) {
+	raw, ok := object[key]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	return value, true
 }
 
 func (h *handler) routeResponsesBody(body []byte) []byte {
@@ -225,27 +239,22 @@ func (h *handler) routeResponsesBody(body []byte) []byte {
 		return body
 	}
 
-	var request responsesRoutingRequest
-	if err := json.Unmarshal(body, &request); err != nil || request.Model == "" {
+	object, ok := decodeRoutingObject(body)
+	if !ok {
 		return body
 	}
-	if !responsesInputIsTextOnly(request.Input) {
+	model, ok := routingStringField(object, "model")
+	if !ok || model == "" {
 		return body
 	}
-	if rawJSONHasValues(request.Tools) {
+	input, ok := object["input"]
+	if !ok || !responsesInputIsTextOnly(input) {
+		return body
+	}
+	if tools, ok := object["tools"]; ok && rawJSONHasValues(tools) {
 		return body
 	}
 	return h.routeModelBody(body, compatibility.CapabilityResponses)
-}
-
-type responsesRoutingInputItem struct {
-	Type    string          `json:"type"`
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-}
-
-type responsesRoutingContentPart struct {
-	Type string `json:"type"`
 }
 
 func responsesInputIsTextOnly(raw json.RawMessage) bool {
@@ -254,36 +263,50 @@ func responsesInputIsTextOnly(raw json.RawMessage) bool {
 		return true
 	}
 
-	var items []responsesRoutingInputItem
+	var items []json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
 		return false
 	}
-	for _, item := range items {
-		if !responsesInputItemIsTextOnly(item) {
+	for _, rawItem := range items {
+		item, ok := decodeRoutingObject(rawItem)
+		if !ok || !responsesInputItemIsTextOnly(item) {
 			return false
 		}
 	}
 	return true
 }
 
-func responsesInputItemIsTextOnly(item responsesRoutingInputItem) bool {
-	if item.Type != "" && item.Type != "message" {
+func responsesInputItemIsTextOnly(item map[string]json.RawMessage) bool {
+	if rawType, ok := item["type"]; ok {
+		var itemType string
+		if json.Unmarshal(rawType, &itemType) != nil || itemType != "" && itemType != "message" {
+			return false
+		}
+	}
+	role, ok := routingStringField(item, "role")
+	if !ok || strings.TrimSpace(role) == "" {
 		return false
 	}
-	if strings.TrimSpace(item.Role) == "" {
+	content, ok := item["content"]
+	if !ok {
 		return false
 	}
 
 	var text string
-	if json.Unmarshal(item.Content, &text) == nil {
+	if json.Unmarshal(content, &text) == nil {
 		return true
 	}
-	var parts []responsesRoutingContentPart
-	if err := json.Unmarshal(item.Content, &parts); err != nil || len(parts) == 0 {
+	var parts []json.RawMessage
+	if err := json.Unmarshal(content, &parts); err != nil || len(parts) == 0 {
 		return false
 	}
-	for _, part := range parts {
-		if part.Type != "input_text" {
+	for _, rawPart := range parts {
+		part, ok := decodeRoutingObject(rawPart)
+		if !ok {
+			return false
+		}
+		partType, ok := routingStringField(part, "type")
+		if !ok || partType != "input_text" {
 			return false
 		}
 	}
@@ -298,26 +321,21 @@ func rawJSONHasValues(raw json.RawMessage) bool {
 	return true
 }
 
-type chatRoutingRequest struct {
-	Model    string               `json:"model"`
-	Messages []chatRoutingMessage `json:"messages"`
-}
-
-type chatRoutingMessage struct {
-	Content json.RawMessage `json:"content"`
-}
-
-type chatRoutingContentPart struct {
-	Type string `json:"type"`
-}
-
 func (h *handler) routeChatCompletionBody(body []byte) []byte {
 	if len(h.fallbackModels) == 0 {
 		return body
 	}
 
-	var request chatRoutingRequest
-	if err := json.Unmarshal(body, &request); err != nil || request.Model == "" || !chatRoutingHasVisionInput(request.Messages) {
+	object, ok := decodeRoutingObject(body)
+	if !ok {
+		return body
+	}
+	model, ok := routingStringField(object, "model")
+	if !ok || model == "" {
+		return body
+	}
+	messagesRaw, ok := object["messages"]
+	if !ok || !chatRoutingHasVisionInput(messagesRaw) {
 		return body
 	}
 	return h.routeModelBody(body, compatibility.CapabilityChatCompletions, compatibility.CapabilityVisionInput)
@@ -328,21 +346,19 @@ func (h *handler) routeModelBody(body []byte, required ...compatibility.Capabili
 		return body
 	}
 
-	var envelope struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Model == "" {
+	object, ok := decodeRoutingObject(body)
+	if !ok {
 		return body
 	}
-	selected := h.selectCertifiedModel(envelope.Model, required...)
-	if selected == envelope.Model {
+	requested, ok := routingStringField(object, "model")
+	if !ok || requested == "" {
+		return body
+	}
+	selected := h.selectCertifiedModel(requested, required...)
+	if selected == requested {
 		return body
 	}
 
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(body, &object); err != nil {
-		return body
-	}
 	model, err := json.Marshal(selected)
 	if err != nil {
 		return body
@@ -355,14 +371,31 @@ func (h *handler) routeModelBody(body []byte, required ...compatibility.Capabili
 	return routed
 }
 
-func chatRoutingHasVisionInput(messages []chatRoutingMessage) bool {
-	for _, message := range messages {
-		var parts []chatRoutingContentPart
-		if err := json.Unmarshal(message.Content, &parts); err != nil {
+func chatRoutingHasVisionInput(raw json.RawMessage) bool {
+	var messages []json.RawMessage
+	if err := json.Unmarshal(raw, &messages); err != nil {
+		return false
+	}
+	for _, rawMessage := range messages {
+		message, ok := decodeRoutingObject(rawMessage)
+		if !ok {
 			continue
 		}
-		for _, part := range parts {
-			if part.Type == "image_url" {
+		content, ok := message["content"]
+		if !ok {
+			continue
+		}
+		var parts []json.RawMessage
+		if err := json.Unmarshal(content, &parts); err != nil {
+			continue
+		}
+		for _, rawPart := range parts {
+			part, ok := decodeRoutingObject(rawPart)
+			if !ok {
+				continue
+			}
+			partType, ok := routingStringField(part, "type")
+			if ok && partType == "image_url" {
 				return true
 			}
 		}

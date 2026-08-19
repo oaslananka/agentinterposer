@@ -1328,3 +1328,46 @@ func TestHandlerRequiresSupportedAnthropicVersionBeforeUpstream(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeAnthropicMessagesRequestPreservesStrictContract(t *testing.T) {
+	t.Parallel()
+
+	request, err := decodeAnthropicMessagesRequest([]byte(`{"model":"nvidia/test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("decodeAnthropicMessagesRequest() error = %v", err)
+	}
+	if request.Model != "nvidia/test" || request.MaxTokens == nil || *request.MaxTokens != 16 {
+		t.Fatalf("decoded request = %#v", request)
+	}
+
+	for _, body := range []string{
+		`{"model":"nvidia/test","max_tokens":16,"future_field":true,"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"nvidia/test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]} {}`,
+		`{"model":"nvidia/test","max_tokens":16,"thinking":{"type":"enabled","budget_tokens":16},"messages":[{"role":"user","content":"hi"}]}`,
+	} {
+		if _, err := decodeAnthropicMessagesRequest([]byte(body)); err == nil {
+			t.Fatalf("decodeAnthropicMessagesRequest(%q) accepted invalid/unsupported input", body)
+		}
+	}
+}
+
+func TestDecodeAnthropicMessagesRequestRejectsMisCasedProtocolFields(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		`{"Model":"nvidia/test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"nvidia/test","MAX_TOKENS":16,"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"nvidia/test","max_tokens":16,"Messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"nvidia/test","max_tokens":16,"messages":[{"Role":"user","content":"hi"}]}`,
+		`{"model":"nvidia/test","max_tokens":16,"messages":[{"role":"user","content":[{"Type":"text","text":"hi"}]}]}`,
+		`{"model":"nvidia/test","max_tokens":16,"metadata":{"User_ID":"probe"},"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"nvidia/test","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[{"Name":"probe","input_schema":{"type":"object"}}]}`,
+		`{"model":"nvidia/test","max_tokens":16,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","Media_Type":"image/png","data":"AA=="}}]}]}`,
+	}
+
+	for _, body := range cases {
+		if _, err := decodeAnthropicMessagesRequest([]byte(body)); err == nil {
+			t.Fatalf("decodeAnthropicMessagesRequest accepted mis-cased protocol field: %s", body)
+		}
+	}
+}
