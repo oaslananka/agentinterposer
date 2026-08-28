@@ -40,6 +40,76 @@ func TestLoadParsesModelRoutesAndResolvesTokenEnv(t *testing.T) {
 	}
 }
 
+func TestLoadAllowsAuthlessModelRoute(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(func(key string) string {
+		switch key {
+		case "NVIDIA_API_KEY":
+			return "test-token"
+		case "AGENTINTERPOSER_MODEL_ROUTES":
+			return `[{"model":"big-pickle","upstream_url":"https://opencode.ai/zen/v1"}]`
+		default:
+			return ""
+		}
+	})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.ModelRoutes) != 1 {
+		t.Fatalf("ModelRoutes = %#v, want one route", cfg.ModelRoutes)
+	}
+	route := cfg.ModelRoutes[0]
+	if route.Model != "big-pickle" || route.UpstreamURL != "https://opencode.ai/zen/v1" {
+		t.Fatalf("route = %#v", route)
+	}
+	if route.UpstreamBearerToken != "" {
+		t.Fatal("authless route unexpectedly resolved a bearer token")
+	}
+}
+
+func TestLoadRejectsExplicitEmptyModelRouteTokenEnv(t *testing.T) {
+	t.Parallel()
+
+	_, err := Load(func(key string) string {
+		switch key {
+		case "NVIDIA_API_KEY":
+			return "test-token"
+		case "AGENTINTERPOSER_MODEL_ROUTES":
+			return `[{"model":"provider/routed-model","upstream_url":"https://alt.example.test/v1","bearer_token_env":"   "}]`
+		default:
+			return ""
+		}
+	})
+	if err == nil {
+		t.Fatal("Load() accepted an explicitly empty bearer_token_env")
+	}
+	if !strings.Contains(err.Error(), "bearer_token_env") {
+		t.Fatalf("error = %q, want bearer_token_env validation", err)
+	}
+}
+
+func TestLoadRejectsNullModelRouteTokenEnv(t *testing.T) {
+	t.Parallel()
+
+	_, err := Load(func(key string) string {
+		switch key {
+		case "NVIDIA_API_KEY":
+			return "test-token"
+		case "AGENTINTERPOSER_MODEL_ROUTES":
+			return `[{"model":"provider/routed-model","upstream_url":"https://alt.example.test/v1","bearer_token_env":null}]`
+		default:
+			return ""
+		}
+	})
+	if err == nil {
+		t.Fatal("Load() accepted a null bearer_token_env")
+	}
+	if !strings.Contains(err.Error(), "bearer_token_env") {
+		t.Fatalf("error = %q, want bearer_token_env validation", err)
+	}
+}
+
 func TestLoadRejectsLiteralTokenInModelRoute(t *testing.T) {
 	t.Parallel()
 

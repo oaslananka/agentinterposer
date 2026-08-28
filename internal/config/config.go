@@ -214,9 +214,9 @@ func fallbackModels(raw string) ([]string, error) {
 }
 
 type modelRouteConfig struct {
-	Model          string `json:"model"`
-	UpstreamURL    string `json:"upstream_url"`
-	BearerTokenEnv string `json:"bearer_token_env"`
+	Model          string          `json:"model"`
+	UpstreamURL    string          `json:"upstream_url"`
+	BearerTokenEnv json.RawMessage `json:"bearer_token_env"`
 }
 
 func parseModelRoutes(raw string, getenv func(string) string) ([]ModelRoute, error) {
@@ -250,13 +250,20 @@ func parseModelRoutes(raw string, getenv func(string) string) ([]ModelRoute, err
 		if err != nil {
 			return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES model %q has invalid upstream_url", model)
 		}
-		envName := strings.TrimSpace(item.BearerTokenEnv)
-		if !validEnvironmentName(envName) {
-			return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES model %q has invalid bearer_token_env", model)
-		}
-		token := getenv(envName)
-		if strings.TrimSpace(token) == "" {
-			return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES bearer token env %s is not set", envName)
+		var token string
+		if item.BearerTokenEnv != nil {
+			var envName string
+			if err := json.Unmarshal(item.BearerTokenEnv, &envName); err != nil {
+				return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES model %q has invalid bearer_token_env", model)
+			}
+			envName = strings.TrimSpace(envName)
+			if !validEnvironmentName(envName) {
+				return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES model %q has invalid bearer_token_env", model)
+			}
+			token = getenv(envName)
+			if strings.TrimSpace(token) == "" {
+				return nil, fmt.Errorf("AGENTINTERPOSER_MODEL_ROUTES bearer token env %s is not set", envName)
+			}
 		}
 		routes = append(routes, ModelRoute{
 			Model:               model,

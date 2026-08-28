@@ -147,9 +147,6 @@ func normalizeModelRoutes(routes []ModelRoute) (map[string]upstreamRoute, error)
 		if err != nil {
 			return nil, fmt.Errorf("invalid upstream URL for model route %q", model)
 		}
-		if strings.TrimSpace(route.UpstreamBearerToken) == "" {
-			return nil, fmt.Errorf("missing bearer token for model route %q", model)
-		}
 		result[model] = upstreamRoute{upstreamURL: upstreamURL, upstreamBearerToken: route.UpstreamBearerToken}
 	}
 	return result, nil
