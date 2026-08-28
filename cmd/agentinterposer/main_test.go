@@ -125,6 +125,40 @@ func TestRunConfigCommandPrintsOpenCodeConfig(t *testing.T) {
 	}
 }
 
+func TestRunConfigCommandPrintsOpenCodeConfigWithMultipleModels(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr strings.Builder
+	handled, exitCode := runConfigCommand(
+		[]string{"config", "opencode", "big-pickle,hy3-free,laguna-s-2.1-free"},
+		&stdout,
+		&stderr,
+	)
+	if !handled || exitCode != 0 {
+		t.Fatalf("runConfigCommand() = handled:%v exit:%d stderr:%q", handled, exitCode, stderr.String())
+	}
+	for _, model := range []string{"big-pickle", "hy3-free", "laguna-s-2.1-free"} {
+		if !strings.Contains(stdout.String(), `"`+model+`"`) {
+			t.Fatalf("stdout missing OpenCode model %q:\n%s", model, stdout.String())
+		}
+	}
+}
+
+func TestRunConfigCommandRejectsInvalidOpenCodeModelList(t *testing.T) {
+	t.Parallel()
+
+	for _, models := range []string{"big-pickle,,hy3-free", "big-pickle,big-pickle"} {
+		var stdout, stderr strings.Builder
+		handled, exitCode := runConfigCommand([]string{"config", "opencode", models}, &stdout, &stderr)
+		if !handled || exitCode != 2 {
+			t.Fatalf("models %q: runConfigCommand() = handled:%v exit:%d", models, handled, exitCode)
+		}
+		if !strings.Contains(stderr.String(), "invalid config request") {
+			t.Fatalf("models %q: stderr = %q", models, stderr.String())
+		}
+	}
+}
+
 func TestRunConfigCommandPrintsContinueConfig(t *testing.T) {
 	t.Parallel()
 
@@ -234,6 +268,9 @@ func TestRunMetaCommandPrintsHelpWithoutProviderCredential(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "usage: agentinterposer") || !strings.Contains(stdout.String(), "capabilities") || !strings.Contains(stdout.String(), "config") {
 			t.Fatalf("help output missing usage/subcommands:\n%s", stdout.String())
+		}
+		if !strings.Contains(stdout.String(), "OpenCode accepts comma-separated model IDs") {
+			t.Fatalf("help output missing OpenCode multi-model hint:\n%s", stdout.String())
 		}
 		if stderr.Len() != 0 {
 			t.Fatalf("stderr = %q", stderr.String())

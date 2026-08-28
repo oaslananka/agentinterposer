@@ -87,6 +87,37 @@ func TestRenderOpenCodeConfigUsesOpenAICompatibleProvider(t *testing.T) {
 	}
 }
 
+func TestRenderOpenCodeConfigModelsIncludesEveryModel(t *testing.T) {
+	t.Parallel()
+
+	got, err := RenderOpenCodeConfigModels([]string{"big-pickle", "hy3-free", "laguna-s-2.1-free"}, "http://127.0.0.1:11435")
+	if err != nil {
+		t.Fatalf("RenderOpenCodeConfigModels() error = %v", err)
+	}
+	for _, model := range []string{"big-pickle", "hy3-free", "laguna-s-2.1-free"} {
+		if !strings.Contains(got, `"`+model+`"`) {
+			t.Errorf("OpenCode config missing model %q:\n%s", model, got)
+		}
+	}
+}
+
+func TestRenderOpenCodeConfigModelsRejectsInvalidModelLists(t *testing.T) {
+	t.Parallel()
+
+	for name, models := range map[string][]string{
+		"empty list":      nil,
+		"empty model":     {"big-pickle", "   "},
+		"duplicate model": {"big-pickle", " big-pickle "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := RenderOpenCodeConfigModels(models, "http://127.0.0.1:11435"); err == nil {
+				t.Fatal("RenderOpenCodeConfigModels() accepted invalid model list")
+			}
+		})
+	}
+}
+
 func TestRenderContinueConfigUsesOpenAICompatibleGateway(t *testing.T) {
 	t.Parallel()
 
