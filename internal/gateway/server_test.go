@@ -201,6 +201,54 @@ func TestHandlerRoutesExplicitModelToDedicatedUpstream(t *testing.T) {
 	}
 }
 
+func TestHandlerRoutesExplicitModelWithoutAuthorization(t *testing.T) {
+	t.Parallel()
+
+	var defaultHits atomic.Int32
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defaultHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer defaultUpstream.Close()
+
+	var gotAuthorization string
+	routedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-routed","model":"big-pickle","choices":[]}`))
+	}))
+	defer routedUpstream.Close()
+
+	handler, err := NewHandler(Config{
+		UpstreamURL:         defaultUpstream.URL,
+		UpstreamBearerToken: "default-token",
+		MaxConcurrent:       1,
+		MaxRequestBytes:     1 << 20,
+		ModelRoutes: []ModelRoute{{
+			Model:       "big-pickle",
+			UpstreamURL: routedUpstream.URL + "/v1/",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+
+	body := `{"model":"big-pickle","messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer client-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if defaultHits.Load() != 0 {
+		t.Fatalf("default upstream hits = %d, want 0", defaultHits.Load())
+	}
+	if gotAuthorization != "" {
+		t.Fatalf("routed Authorization = %q, want no Authorization header", gotAuthorization)
+	}
+}
+
 func TestHandlerUsesDefaultUpstreamForUnroutedModel(t *testing.T) {
 	t.Parallel()
 
@@ -313,9 +361,8 @@ func TestNewHandlerRejectsInvalidModelRoutes(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string][]ModelRoute{
-		"empty model":   {{Model: "", UpstreamURL: "https://route.example.test", UpstreamBearerToken: "route-token"}},
-		"invalid URL":   {{Model: "provider/model", UpstreamURL: "file:///tmp/provider", UpstreamBearerToken: "route-token"}},
-		"missing token": {{Model: "provider/model", UpstreamURL: "https://route.example.test", UpstreamBearerToken: ""}},
+		"empty model": {{Model: "", UpstreamURL: "https://route.example.test", UpstreamBearerToken: "route-token"}},
+		"invalid URL": {{Model: "provider/model", UpstreamURL: "file:///tmp/provider", UpstreamBearerToken: "route-token"}},
 		"duplicate model": {
 			{Model: "provider/model", UpstreamURL: "https://one.example.test", UpstreamBearerToken: "one-token"},
 			{Model: "provider/model", UpstreamURL: "https://two.example.test", UpstreamBearerToken: "two-token"},
