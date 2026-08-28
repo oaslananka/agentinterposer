@@ -270,19 +270,34 @@ For a non-default gateway location, pass the root URL as the fourth argument, fo
 | `AGENTINTERPOSER_UPSTREAM_BODY_IDLE_TIMEOUT` | `2m` | Maximum interval without upstream response-body progress; active streams reset this deadline on every read |
 | `AGENTINTERPOSER_MAX_REQUEST_BYTES` | `33554432` | Maximum request body size in bytes |
 | `AGENTINTERPOSER_FALLBACK_MODELS` | none | Ordered comma-separated fallback model IDs selected only from positive capability evidence |
-| `AGENTINTERPOSER_MODEL_ROUTES` | none | JSON array mapping exact model IDs to dedicated upstream URLs and bearer-token environment variable names |
+| `AGENTINTERPOSER_MODEL_ROUTES` | none | JSON array mapping exact model IDs to dedicated upstream URLs; `bearer_token_env` is optional for upstreams that explicitly support unauthenticated requests |
 
 For a non-NVIDIA OpenAI-compatible default upstream, set both `AGENTINTERPOSER_UPSTREAM_URL` and `AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN`.
 
 ### Per-model upstream routes
 
-`AGENTINTERPOSER_MODEL_ROUTES` can send an explicitly requested model—or a model selected by `AGENTINTERPOSER_FALLBACK_MODELS`—to a different OpenAI-compatible upstream. The JSON contains only the **name** of the environment variable that holds the route credential; do not embed a bearer token value in the JSON. Unknown fields are rejected, so a literal `bearer_token` field is invalid.
+`AGENTINTERPOSER_MODEL_ROUTES` can send an explicitly requested model—or a model selected by `AGENTINTERPOSER_FALLBACK_MODELS`—to a different OpenAI-compatible upstream. For authenticated routes, the JSON contains only the **name** of the environment variable that holds the route credential; do not embed a bearer token value in the JSON. Unknown fields are rejected, so a literal `bearer_token` field is invalid.
 
 ```bash
 export AGENTINTERPOSER_MODEL_ROUTES='[{"model":"provider/routed-model","upstream_url":"https://api.example.test/v1","bearer_token_env":"ALT_PROVIDER_API_KEY"}]'
 ```
 
-Supply `ALT_PROVIDER_API_KEY` to the AgentInterposer process from Doppler (or the equivalent secret-injection mechanism for your deployment). Unrouted models continue to use the default upstream and credential, and `GET /v1/models` remains a default-upstream discovery request. Configuring a route is an operator routing choice; it does not create a compatibility certification for that model or provider.
+Supply `ALT_PROVIDER_API_KEY` to the AgentInterposer process from Doppler (or the equivalent secret-injection mechanism for your deployment). If an upstream explicitly supports unauthenticated requests, omit `bearer_token_env`; AgentInterposer then sends no upstream `Authorization` header for that route, including when the client itself supplied a placeholder bearer token. For example, OpenCode Zen free Chat Completions models can be routed alongside the default NVIDIA upstream without storing a Zen credential:
+
+```bash
+export AGENTINTERPOSER_MODEL_ROUTES='[
+  {"model":"big-pickle","upstream_url":"https://opencode.ai/zen/v1"},
+  {"model":"hy3-free","upstream_url":"https://opencode.ai/zen/v1"},
+  {"model":"laguna-s-2.1-free","upstream_url":"https://opencode.ai/zen/v1"}
+]'
+./agentinterposer config opencode big-pickle > opencode.json
+```
+
+Zen's free catalog and provider availability can change independently, and free requests can be rate-limited. An explicit route therefore means only “send this model to this upstream”; it does **not** add that model to the built-in capability registry or certify an OpenCode agent/tool loop. Models intended to use a different Zen protocol, such as the Responses API, require a client/provider configuration that uses the corresponding protocol rather than the generated OpenCode `@ai-sdk/openai-compatible` helper. The generated OpenCode helper remains governed by the version-specific client certification boundary above; authless routing support does not expand the certified OpenCode CLI versions.
+
+Unrouted models continue to use the default upstream and credential, and `GET /v1/models` remains a default-upstream discovery request. Configuring a route is an operator routing choice; it does not create a compatibility certification for that model or provider.
+
+The manual `OpenCode Zen Smoke` workflow accepts any Zen Chat Completions model ID (default `big-pickle`) and exercises this authless route with an intentionally unreachable default upstream. It has no provider secret and is deliberately not a required PR/release gate because free-model availability and rate limits can drift independently of AgentInterposer.
 
 The manual `Provider Smoke` scope `model-route` certifies the dedicated-route mechanism against NVIDIA hosted inference by making the default upstream deliberately unreachable and requiring an explicitly routed model to return a valid Chat Completions response. Composition scopes use the same unreachable-default design to prove that capability fallback and per-model routing work together: `chat-vision-routed-fallback` and `messages-vision-routed-fallback` send image-bearing Nemotron requests that must select the Llama vision fallback and follow its dedicated route, while `responses-routed-fallback` and `responses-structured-routed-fallback` send simple or structured `input_text` Responses requests that must select the Responses-certified Nemotron fallback and follow its dedicated route. The routed vision scopes validate the selected model and protocol envelope rather than duplicating randomized image-accuracy checks, which remain covered by the existing vision certification scopes. All of these probes certify routing mechanisms against the already-used NVIDIA provider; they do **not** claim compatibility with a second external provider.
 
