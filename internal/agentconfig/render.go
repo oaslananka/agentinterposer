@@ -31,9 +31,28 @@ stream_max_retries = 0
 }
 
 func RenderOpenCodeConfig(model, gatewayURL string) (string, error) {
-	model, baseURL, err := validateInputs(model, gatewayURL)
+	return RenderOpenCodeConfigModels([]string{model}, gatewayURL)
+}
+
+func RenderOpenCodeConfigModels(models []string, gatewayURL string) (string, error) {
+	baseURL, err := validateGatewayURL(gatewayURL)
 	if err != nil {
 		return "", err
+	}
+	if len(models) == 0 {
+		return "", errors.New("at least one model is required")
+	}
+
+	modelEntries := make(map[string]any, len(models))
+	for _, rawModel := range models {
+		model := strings.TrimSpace(rawModel)
+		if model == "" {
+			return "", errors.New("model is required")
+		}
+		if _, duplicate := modelEntries[model]; duplicate {
+			return "", fmt.Errorf("duplicate model %q", model)
+		}
+		modelEntries[model] = map[string]any{"name": model}
 	}
 
 	document := map[string]any{
@@ -46,9 +65,7 @@ func RenderOpenCodeConfig(model, gatewayURL string) (string, error) {
 					"baseURL": baseURL + "/v1",
 					"apiKey":  "{env:AGENTINTERPOSER_CLIENT_KEY}",
 				},
-				"models": map[string]any{
-					model: map[string]any{"name": model},
-				},
+				"models": modelEntries,
 			},
 		},
 	}
@@ -94,19 +111,26 @@ func validateInputs(model, gatewayURL string) (string, string, error) {
 	if model == "" {
 		return "", "", errors.New("model is required")
 	}
+	baseURL, err := validateGatewayURL(gatewayURL)
+	if err != nil {
+		return "", "", err
+	}
+	return model, baseURL, nil
+}
 
+func validateGatewayURL(gatewayURL string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(gatewayURL))
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return "", "", errors.New("gateway URL must be an absolute HTTP(S) URL")
+		return "", errors.New("gateway URL must be an absolute HTTP(S) URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", "", errors.New("gateway URL must not contain user info, query parameters, or a fragment")
+		return "", errors.New("gateway URL must not contain user info, query parameters, or a fragment")
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	if strings.HasSuffix(parsed.Path, "/v1") {
 		parsed.Path = strings.TrimSuffix(parsed.Path, "/v1")
 	}
-	return model, strings.TrimRight(parsed.String(), "/"), nil
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func quoteYAMLString(value string) string {

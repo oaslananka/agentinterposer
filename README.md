@@ -241,16 +241,17 @@ The manual `scope=opencode` Provider Smoke profile pins the OpenCode Linux x64 c
 
 ### Generate agent client configuration
 
-The binary can print secret-free client configuration without starting the gateway or requiring an upstream provider credential. Supply the model explicitly; an optional fourth argument overrides the default local gateway URL `http://127.0.0.1:11435`.
+The binary can print secret-free client configuration without starting the gateway or requiring an upstream provider credential. Supply the model explicitly; an optional fourth argument overrides the default local gateway URL `http://127.0.0.1:11435`. The OpenCode helper additionally accepts a comma-separated model list so one provider entry can expose several exact model IDs through the same gateway.
 
 ```bash
 ./agentinterposer config codex nvidia/nemotron-3-super-120b-a12b
 ./agentinterposer config claude-code nvidia/nemotron-3-super-120b-a12b
 ./agentinterposer config opencode nvidia/nemotron-3-super-120b-a12b
+./agentinterposer config opencode 'big-pickle,hy3-free,nemotron-3-ultra-free,laguna-s-2.1-free'
 ./agentinterposer config continue nvidia/nemotron-3-super-120b-a12b
 ```
 
-The Codex helper prints a `~/.codex/config.toml` fragment using AgentInterposer's Responses endpoint and an `AGENTINTERPOSER_CLIENT_KEY` local placeholder. The Claude Code helper prints shell exports for `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_DISABLE_THINKING=1`, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, `CLAUDE_CODE_EFFORT_LEVEL=auto`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` so the generated environment matches the certified compatibility profile; Claude Code `2.1.233` still emits the four certified compatibility markers listed above, which the adapter tolerates only within its otherwise strict Messages subset. The OpenCode helper prints an `opencode.json` custom provider using `@ai-sdk/openai-compatible`, the AgentInterposer `/v1` endpoint, an explicit model entry, and `{env:AGENTINTERPOSER_CLIENT_KEY}` for the local client credential; that generated helper is used by the exact OpenCode CLI `1.18.18` dependent-tool certification above. The Continue helper prints a `~/.continue/config.yaml` configuration for the Continue VS Code/JetBrains extension using its OpenAI-compatible provider, the AgentInterposer `/v1` endpoint, a harmless local placeholder API key, and `useResponsesApi: false` so generic model IDs stay on the Chat Completions path. This is a connection helper, not a Continue compatibility certification. The placeholder client credentials are not upstream provider secrets; the real upstream bearer token remains owned by the AgentInterposer server process.
+The Codex helper prints a `~/.codex/config.toml` fragment using AgentInterposer's Responses endpoint and an `AGENTINTERPOSER_CLIENT_KEY` local placeholder. The Claude Code helper prints shell exports for `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_DISABLE_THINKING=1`, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, `CLAUDE_CODE_EFFORT_LEVEL=auto`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` so the generated environment matches the certified compatibility profile; Claude Code `2.1.233` still emits the four certified compatibility markers listed above, which the adapter tolerates only within its otherwise strict Messages subset. The OpenCode helper prints an `opencode.json` custom provider using `@ai-sdk/openai-compatible`, the AgentInterposer `/v1` endpoint, one or more explicit model entries, and `{env:AGENTINTERPOSER_CLIENT_KEY}` for the local client credential. Comma-separated OpenCode model IDs are trimmed, and empty or duplicate entries are rejected instead of producing ambiguous configuration. The same helper remains the basis of the exact OpenCode CLI `1.18.18` dependent-tool certification above; exposing additional model IDs does not certify those models or later OpenCode versions. The Continue helper prints a `~/.continue/config.yaml` configuration for the Continue VS Code/JetBrains extension using its OpenAI-compatible provider, the AgentInterposer `/v1` endpoint, a harmless local placeholder API key, and `useResponsesApi: false` so generic model IDs stay on the Chat Completions path. This is a connection helper, not a Continue compatibility certification. The placeholder client credentials are not upstream provider secrets; the real upstream bearer token remains owned by the AgentInterposer server process.
 
 For a non-default gateway location, pass the root URL as the fourth argument, for example `https://gateway.example.test/agent`; the Codex, OpenCode, and Continue renderers derive their `/v1` endpoint while Claude Code uses the gateway root.
 
@@ -270,19 +271,34 @@ For a non-default gateway location, pass the root URL as the fourth argument, fo
 | `AGENTINTERPOSER_UPSTREAM_BODY_IDLE_TIMEOUT` | `2m` | Maximum interval without upstream response-body progress; active streams reset this deadline on every read |
 | `AGENTINTERPOSER_MAX_REQUEST_BYTES` | `33554432` | Maximum request body size in bytes |
 | `AGENTINTERPOSER_FALLBACK_MODELS` | none | Ordered comma-separated fallback model IDs selected only from positive capability evidence |
-| `AGENTINTERPOSER_MODEL_ROUTES` | none | JSON array mapping exact model IDs to dedicated upstream URLs and bearer-token environment variable names |
+| `AGENTINTERPOSER_MODEL_ROUTES` | none | JSON array mapping exact model IDs to dedicated upstream URLs; `bearer_token_env` is optional for upstreams that explicitly support unauthenticated requests |
 
 For a non-NVIDIA OpenAI-compatible default upstream, set both `AGENTINTERPOSER_UPSTREAM_URL` and `AGENTINTERPOSER_UPSTREAM_BEARER_TOKEN`.
 
 ### Per-model upstream routes
 
-`AGENTINTERPOSER_MODEL_ROUTES` can send an explicitly requested model—or a model selected by `AGENTINTERPOSER_FALLBACK_MODELS`—to a different OpenAI-compatible upstream. The JSON contains only the **name** of the environment variable that holds the route credential; do not embed a bearer token value in the JSON. Unknown fields are rejected, so a literal `bearer_token` field is invalid.
+`AGENTINTERPOSER_MODEL_ROUTES` can send an explicitly requested model—or a model selected by `AGENTINTERPOSER_FALLBACK_MODELS`—to a different OpenAI-compatible upstream. For authenticated routes, the JSON contains only the **name** of the environment variable that holds the route credential; do not embed a bearer token value in the JSON. Unknown fields are rejected, so a literal `bearer_token` field is invalid.
 
 ```bash
 export AGENTINTERPOSER_MODEL_ROUTES='[{"model":"provider/routed-model","upstream_url":"https://api.example.test/v1","bearer_token_env":"ALT_PROVIDER_API_KEY"}]'
 ```
 
-Supply `ALT_PROVIDER_API_KEY` to the AgentInterposer process from Doppler (or the equivalent secret-injection mechanism for your deployment). Unrouted models continue to use the default upstream and credential, and `GET /v1/models` remains a default-upstream discovery request. Configuring a route is an operator routing choice; it does not create a compatibility certification for that model or provider.
+Supply `ALT_PROVIDER_API_KEY` to the AgentInterposer process from Doppler (or the equivalent secret-injection mechanism for your deployment). If an upstream explicitly supports unauthenticated requests, omit `bearer_token_env`; AgentInterposer then sends no upstream `Authorization` header for that route, including when the client itself supplied a placeholder bearer token. For example, OpenCode Zen free Chat Completions models can be routed alongside the default NVIDIA upstream without storing a Zen credential:
+
+```bash
+export AGENTINTERPOSER_MODEL_ROUTES='[
+  {"model":"big-pickle","upstream_url":"https://opencode.ai/zen/v1"},
+  {"model":"hy3-free","upstream_url":"https://opencode.ai/zen/v1"},
+  {"model":"laguna-s-2.1-free","upstream_url":"https://opencode.ai/zen/v1"}
+]'
+./agentinterposer config opencode 'big-pickle,hy3-free,laguna-s-2.1-free' > opencode.json
+```
+
+Zen's free catalog and provider availability can change independently, and free requests can be rate-limited. An explicit route therefore means only “send this model to this upstream”; it does **not** add that model to the built-in capability registry or certify an OpenCode agent/tool loop. Models intended to use a different Zen protocol, such as the Responses API, require a client/provider configuration that uses the corresponding protocol rather than the generated OpenCode `@ai-sdk/openai-compatible` helper. The generated OpenCode helper remains governed by the version-specific client certification boundary above; authless routing support does not expand the certified OpenCode CLI versions.
+
+Unrouted models continue to use the default upstream and credential, and `GET /v1/models` remains a default-upstream discovery request. Configuring a route is an operator routing choice; it does not create a compatibility certification for that model or provider.
+
+The manual `OpenCode Zen Smoke` workflow accepts any Zen Chat Completions model ID (default `big-pickle`) and exercises this authless route with an intentionally unreachable default upstream. It has no provider secret and is deliberately not a required PR/release gate because free-model availability and rate limits can drift independently of AgentInterposer.
 
 The manual `Provider Smoke` scope `model-route` certifies the dedicated-route mechanism against NVIDIA hosted inference by making the default upstream deliberately unreachable and requiring an explicitly routed model to return a valid Chat Completions response. Composition scopes use the same unreachable-default design to prove that capability fallback and per-model routing work together: `chat-vision-routed-fallback` and `messages-vision-routed-fallback` send image-bearing Nemotron requests that must select the Llama vision fallback and follow its dedicated route, while `responses-routed-fallback` and `responses-structured-routed-fallback` send simple or structured `input_text` Responses requests that must select the Responses-certified Nemotron fallback and follow its dedicated route. The routed vision scopes validate the selected model and protocol envelope rather than duplicating randomized image-accuracy checks, which remain covered by the existing vision certification scopes. All of these probes certify routing mechanisms against the already-used NVIDIA provider; they do **not** claim compatibility with a second external provider.
 
